@@ -1140,15 +1140,11 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             
-#             high_res_mask = kwargs['high_res_mask']
-            print(high_res_mask.shape, image_grid_thw.shape)
-            num_images = image_grid_thw.shape[0]  # 图像数量
-            hidden_dim = image_embeds.shape[-1]  # 2560
-            # 定义池化层（平均池化，核大小6，步长6 → 12/6=2）
-            # 可选：MaxPool2d 替换 AvgPool2d 用最大池化
+            num_images = image_grid_thw.shape[0]  # img num
+            hidden_dim = image_embeds.shape[-1]
             pool_layer = torch.nn.AvgPool2d(kernel_size=6, stride=6, padding=0)
             
-            processed_embeds = []  # 存储处理后的所有图片特征
+            processed_embeds = []
             for img_idx in range(num_images):
                 ori_patch_num = 1*12*12
                 single_img_embed = image_embeds[img_idx*ori_patch_num : (img_idx+1)*ori_patch_num]
@@ -1180,49 +1176,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                         processed_single_ds = sing_ds_embed_pooled.permute(0,2,3,1).reshape(-1, hidden_dim)
                     processed_ds_embeds.append(processed_single_ds)
                 deepstack_image_embeds_pooled.append(torch.cat(processed_ds_embeds, dim=0))
-                
-                
-                # ds_embed_reshaped = ds_embed.reshape(num_images, original_h, original_w, hidden_dim).permute(0, 3, 1, 2)
-                # ds_embed_pooled = pool_layer(ds_embed_reshaped).permute(0, 2, 3, 1).reshape(-1, hidden_dim)
-                # deepstack_image_embeds_pooled.append(ds_embed_pooled)
             deepstack_image_embeds = deepstack_image_embeds_pooled
             
-#             import pdb; pdb.set_trace()
-            
-            # num_images = image_grid_thw.shape[0]  # 图像数量
-            # original_h, original_w = image_grid_thw[0][1].item()//2, image_grid_thw[0][2].item()//2  # 12,12
-            # hidden_dim = image_embeds.shape[-1]  # 2560
-            
-            # # 步骤2：reshape为[num_images, h, w, hidden_dim]（恢复空间维度）
-            # # 原始image_embeds shape: [num_images×h×w, hidden_dim] → 展平的patch序列
-            # image_embeds_reshaped = image_embeds.reshape(num_images, original_h, original_w, hidden_dim)
-            # # 调整维度为[num_images, hidden_dim, h, w]（适配PyTorch的2D池化输入格式）
-            # image_embeds_reshaped = image_embeds_reshaped.permute(0, 3, 1, 2)
-            
-            # # 步骤3：定义池化层（平均池化，核大小6，步长6 → 12/6=2）
-            # # 可选：MaxPool2d 替换 AvgPool2d 用最大池化
-            # pool_layer = torch.nn.AvgPool2d(kernel_size=6, stride=6, padding=0)
-            # # 执行池化：[num_images, 2560, 12, 12] → [num_images, 2560, 2, 2]
-            # image_embeds_pooled = pool_layer(image_embeds_reshaped)
-            
-            # # 步骤4：重新展平为一维token序列（适配原有逻辑）
-            # # [num_images, 2560, 2, 2] → [num_images×2×2, 2560]
-            # image_embeds_pooled = image_embeds_pooled.permute(0, 2, 3, 1)  # 恢复维度顺序：[num_images, 2, 2, 2560]
-            # image_embeds = image_embeds_pooled.reshape(-1, hidden_dim)  # 新的image_embeds：num_images×4 → 压缩后token数
-        
-            # # import pdb; pdb.set_trace()
-            # image_mask, _ = self.get_placeholder_mask(
-            #     input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
-            # )
-            # inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-            
-            # #*
-            # deepstack_image_embeds_pooled = []
-            # for ds_embed in deepstack_image_embeds:
-            #     ds_embed_reshaped = ds_embed.reshape(num_images, original_h, original_w, hidden_dim).permute(0, 3, 1, 2)
-            #     ds_embed_pooled = pool_layer(ds_embed_reshaped).permute(0, 2, 3, 1).reshape(-1, hidden_dim)
-            #     deepstack_image_embeds_pooled.append(ds_embed_pooled)
-            # deepstack_image_embeds = deepstack_image_embeds_pooled
 
         if pixel_values_videos is not None:
             video_embeds, deepstack_video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)

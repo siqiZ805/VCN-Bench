@@ -1,17 +1,10 @@
 import os
 import json
-import pickle
-from collections import defaultdict
-import logging
 import numpy as np
-import glob
 import matplotlib.pyplot as plt
 import matplotlib.image
 from typing import Union
 
-import habitat_sim
-
-from src.scene_goatbench import Scene
 from src.tsdf_planner import TSDFPlanner, Frontier, SnapShot
 
 
@@ -37,12 +30,47 @@ class Logger:
 
         return self.episode_dir, eps_frontier_dir, eps_snapshot_dir
     
-    def init_task(self, pts, tsdf_planner):
+    def init_collect_task(self, pts, tsdf_planner):
         self.pts_voxels = np.empty((0, 2))
         self.pts_voxels = np.vstack(
             [self.pts_voxels, tsdf_planner.habitat2voxel(pts)[:2]]
         )
         self.subtask_explore_dist = 0.0
+        
+    def init_eval_task(self, episode, pts, tsdf_planner):
+        #* 1. nav goal
+        goal_category = episode['object_category']
+        goal_obj_ids = episode['instruction']['instance_id']
+        goal_positions = [episode['goals'][0]['position']]
+        goal_positions_voxel = [tsdf_planner.habitat2voxel(p) for p in goal_positions]
+        viewpoints = [
+            vp['agent_state']['position']
+            for vp in episode['goals'][0]['view_points']
+        ]
+        gt_dist = episode['dist_to_goal'] + 1e-6
+        
+        _instr = episode['instruction']
+        if 'image' in _instr['task_type']:
+            goal = _instr['img_path']
+        else:
+            goal = _instr['instruction_text']
+            
+        #* 2. prepare metadata
+        metadata = {
+            "goal": goal,
+            "class": goal_category,
+            "goal_obj_ids": goal_obj_ids,  # e.g. ["1mp3d_0070_region1/washbasin_10"]
+            "goal_positions_voxel": goal_positions_voxel,  # also a list of positions for possible multiple objects
+            "viewpoints": viewpoints,
+            "gt_dist": gt_dist,
+            "gt_bbox": episode['goals'][0]['bbox']
+        }
+        self.pts_voxels = np.empty((0, 2))
+        self.pts_voxels = np.vstack(
+            [self.pts_voxels, tsdf_planner.habitat2voxel(pts)[:2]]
+        )
+        self.subtask_explore_dist = 0.0
+        return metadata
         
     def log_step(self, pts_voxel):
         self.pts_voxels = np.vstack([self.pts_voxels, pts_voxel])

@@ -22,7 +22,7 @@ from src.geom import get_cam_intr, get_scene_bnds
 from src.tsdf_planner import TSDFPlanner, SnapShot
 from src.scene_memo import Scene
 from src.utils import get_pts_angle_goatbench
-from loggers.logger_collect import Logger
+from src.logger import Logger
 
 
 def main(cfg):
@@ -98,7 +98,7 @@ def main(cfg):
             episode_dir, eps_frontier_dir, eps_snapshot_dir = logger.init_episode(
                 episode_id=f"{scene_id}_ep_{episode_id}"
             )
-            logger.init_task(pts, tsdf_planner)
+            logger.init_collect_task(pts, tsdf_planner)
             logging.info(f"\n\nScene {scene_id} initialization successful!")
             
             # run steps
@@ -267,7 +267,7 @@ def main(cfg):
                 save_result.append(step_logdir)
 
                 #! (5) Agent navigate to the target point
-                return_values = tsdf_planner.agent_step(
+                return_values = tsdf_planner.agent_step_collect(
                     pts=pts,
                     angle=angle,
                     objects=scene.objects,

@@ -648,60 +648,6 @@ class TSDFPlanner(TSDFPlannerBase):
         cur_point = self.normal2voxel(pts)
         
         nav_points = []  # each element should be: {type, idx, pixel}
-        '''
-        for key, frame in scene.snapshots.items():
-            obj_centers = [objects[obj_id]["bbox"]['center'] for obj_id in frame.cluster]
-            obj_centers = [self.habitat2voxel(center)[:2] for center in obj_centers]
-            obj_centers = list(
-                set([tuple(center) for center in obj_centers])
-            )  # remove duplicates
-            obj_centers = np.asarray(obj_centers)
-            snapshot_center = np.mean(obj_centers, axis=0)
-            # frame.position = snapshot_center
-            scene.snapshots[key].position = snapshot_center
-            
-            if len(obj_centers) == 1:
-                navigable_point = get_proper_observe_point(
-                    snapshot_center, self.unoccupied, cur_point=cur_point,
-                    dist=cfg.final_observe_distance / self._voxel_size,
-                )
-                if navigable_point is None:
-                    # this is usually because the target object is too far, so its surroundings are not detected as unoccupied
-                    # so we just temporarily use pathfinder to find a navigable point around it
-                    point_normal = snapshot_center * self._voxel_size + self._vol_origin[:2]
-                    point_normal = np.append(point_normal, pts[-1])
-                    point_habitat = pos_normal_to_habitat(point_normal)
-                
-                    navigable_point_habitat = get_proper_observe_point_with_pathfinder(
-                        point_habitat, pathfinder, height=pts[-1]
-                    )
-                    if navigable_point_habitat is None:
-                        # logging.error(
-                        #     f"Error in set_next_navigation_point: cannot find a proper navigable point around the target object"
-                        # )
-                        # return False
-                        continue
-                    navigable_point = self.habitat2voxel(navigable_point_habitat)[:2]
-            else:
-                navigable_point = get_proper_snapshot_observation_point(
-                    obj_centers=obj_centers,
-                    snapshot_observation_point=frame.obs_point,
-                    unoccupied_map=self.unoccupied,
-                    min_obs_dist=cfg.final_observe_distance / self._voxel_size - 1,
-                    max_obs_dist=cfg.final_observe_distance / self._voxel_size + 1,
-                )
-                if navigable_point is None:
-                    # logging.error(
-                    #     f"Error in set_next_navigation_point: cannot find a proper observation point for the snapshot"
-                    # )
-                    # return False
-                    continue
-            nav_points.append({
-                'type': 'snapshot', 'idx': key,
-                'pixel': navigable_point, 
-                # 'habitat_point': self.voxel2habitat(navigable_point)
-            })
-            '''
         
         for fidx, frontier in enumerate(self.frontiers):
             direction = frontier.orientation
@@ -743,7 +689,7 @@ class TSDFPlanner(TSDFPlannerBase):
             
         return True
     
-    def agent_step_my(self, pts, angle, pathfinder, cfg):
+    def agent_step_eval(self, pts, angle, pathfinder, cfg):
         if self.target_point is None:
             logging.error(
                 f"Error in agent_step: next_point is None: {self.target_point}"
@@ -880,7 +826,7 @@ class TSDFPlanner(TSDFPlannerBase):
         )
 
 
-    def agent_step(
+    def agent_step_collect(
         self,
         pts,
         angle,
@@ -1010,8 +956,7 @@ class TSDFPlanner(TSDFPlannerBase):
         # Plot
         fig = None
         if save_visualization:
-            fig = self.visualize_my(pts, angle, objects, snapshots)  #!
-            # fig = self.visualize(pts, angle, objects, snapshots)  #!
+            fig = self.visualize(pts, angle, objects, snapshots)
 
         # Convert back to world coordinates
         next_point_normal = next_point * self._voxel_size + self._vol_origin[:2]
@@ -1048,7 +993,7 @@ class TSDFPlanner(TSDFPlannerBase):
             target_arrived,
         )
         
-    def visualize_my(self, pts, angle, objects, snapshots, brief=False, height=1.8):
+    def visualize(self, pts, angle, objects, snapshots, brief=False, height=1.8):
         '''
         pts: output of pos_habitat_to_normal
         '''
@@ -1240,170 +1185,6 @@ class TSDFPlanner(TSDFPlannerBase):
 
             ax1.add_patch(arrow)
         return fig
-    
-    def visualize(self, pts, angle, objects, snapshots, brief=False):
-        '''
-        pts: output of pos_habitat_to_normal
-        '''
-        cur_point = self.normal2voxel(pts)
-        
-        h, w = self._tsdf_vol_cpu.shape[:2]
-        h = 8 * h / w
-        arr_scale = (
-            0.1 / self._voxel_size
-        )  # when for default voxel size=0.1m, the unit length is 1
-
-        fig, ax1 = plt.subplots(figsize=(8, h))
-
-        ft_map = np.zeros(
-            (self._tsdf_vol_cpu.shape[0], self._tsdf_vol_cpu.shape[1], 3),
-            dtype=np.uint8,
-        ) + np.asarray([[[255, 255, 255]]], dtype=np.uint8)
-
-        _, unoccupied_high = self.get_island_around_pts(pts, height=1.8)
-        obstacle_map = self.get_obstacle_map(height=1.8)
-        # convolution to get the obstacles together with surroundings
-        kernel_size = int(0.3 / self._voxel_size)
-        kernel = np.ones((kernel_size, kernel_size))
-        obstacle_map_convolved = ndimage.convolve(
-            obstacle_map.astype(float), kernel, mode="constant", cval=0.0
-        )
-
-        # assign colors to the map
-        ft_map[unoccupied_high > 0] = [200, 200, 200]
-        ft_map[(self.unexplored == 0) & (unoccupied_high > 0)] = [194, 246, 198]
-        ft_map[
-            (obstacle_map_convolved > 0)
-            & (obstacle_map_convolved < kernel_size**2 / 2)
-        ] = [100, 100, 100]
-        ft_map[(obstacle_map_convolved >= kernel_size**2 / 2)] = [0, 0, 0]
-
-        ax1.imshow(ft_map)
-        ax1.axis("off")
-
-        agent_orientation = self.rad2vector(angle)
-
-        ax1.scatter(
-            cur_point[1],
-            cur_point[0],
-            c=(23 / 255, 188 / 255, 243 / 255),
-            s=400,
-            label="current",
-        )
-        end_x, end_y = (
-            cur_point[1] + agent_orientation[1] * 5 * arr_scale,
-            cur_point[0] + agent_orientation[0] * 5 * arr_scale,
-        )
-        ax1.plot(
-            [cur_point[1], end_x],
-            [cur_point[0], end_y],
-            color="black",
-            linewidth=5 * arr_scale,
-        )
-        
-        if brief:
-            return fig
-
-        for key, snapshot in snapshots.items():
-            obs_point = snapshot.obs_point[:2]
-            obj_points = [
-                self.habitat2voxel(objects[obj_id]["bbox"].center)[:2]
-                for obj_id in snapshot.cluster
-            ]
-            obj_center = np.mean(obj_points, axis=0)
-            view_direction = obj_center - obs_point
-            center_angle = (
-                np.arctan2(view_direction[0], view_direction[1]) * 180 / np.pi
-            )
-            obj_angles = [
-                np.arctan2(obj_point[0] - obs_point[0], obj_point[1] - obs_point[1])
-                * 180
-                / np.pi
-                for obj_point in obj_points
-            ]
-            # adjust the angles into proper range
-            obj_angles = [
-                angle if angle > 0 else angle + 360 for angle in obj_angles
-            ]  # range from 0 to 360
-            if max(obj_angles) - min(obj_angles) > 180:
-                obj_angles = [
-                    angle - 360 if angle > 180 else angle for angle in obj_angles
-                ]  # range from -180 to 180
-
-            radius = np.linalg.norm(obj_points - obs_point, axis=1).max()
-            wedge = Wedge(
-                center=(obs_point[1], obs_point[0]),
-                r=radius,
-                theta1=min(obj_angles) - 5,
-                theta2=max(obj_angles) + 5,
-                color=snapshot.color,
-                alpha=0.3,
-            )
-
-            # Add edge to the wedge
-            if (
-                type(self.max_point) == SnapShot
-                and snapshot.image == self.max_point.image
-            ):
-                edge_width = 7
-                wedge_edge = Wedge(
-                    center=(obs_point[1], obs_point[0]),
-                    r=radius,
-                    theta1=min(obj_angles) - 5,
-                    theta2=max(obj_angles) + 5,
-                    facecolor="none",  # No face color for the edge wedge
-                    edgecolor="red",
-                    linewidth=edge_width,
-                )
-                ax1.add_patch(wedge_edge)
-
-            ax1.add_patch(wedge)
-
-            for obj_id in snapshot.cluster:
-                obj_vox = self.habitat2voxel(objects[obj_id]["bbox"].center)
-                ax1.scatter(obj_vox[1], obj_vox[0], color=snapshot.color, s=30)
-
-        if type(self.max_point) == SnapShot:
-            for obj_id in self.max_point.cluster:
-                obj_vox = self.habitat2voxel(objects[obj_id]["bbox"].center)
-                ax1.scatter(obj_vox[1], obj_vox[0], color="r", s=30)
-
-        for frontier in self.frontiers:
-            ax1.scatter(
-                frontier.position[1], frontier.position[0], color="m", s=30, alpha=1
-            )
-            normal = frontier.orientation
-            dx, dy = normal * 10 * arr_scale
-            arrow = FancyArrowPatch(
-                posA=(frontier.position[1], frontier.position[0]),
-                posB=(frontier.position[1] + dy, frontier.position[0] + dx),
-                arrowstyle=f"Simple, tail_width={0.5}, head_width={5}, head_length={5}",
-                linewidth=3,
-                color="m",
-                mutation_scale=1,
-            )
-
-            if type(self.max_point) == Frontier and frontier == self.max_point:
-                ax1.scatter(
-                    frontier.position[1],
-                    frontier.position[0],
-                    color="r",
-                    s=30,
-                    alpha=1,
-                )
-                # Add edge to the arrow
-                arrow.set_path_effects(
-                    [
-                        pe.Stroke(
-                            linewidth=5, foreground="red"
-                        ),  # Edge with linewidth 3 and red color
-                        pe.Normal(),  # Render the original arrow
-                    ]
-                )
-
-            ax1.add_patch(arrow)
-        return fig
-
 
     def get_island_around_pts(self, pts, fill_dim=0.4, height=0.4):
         """Find the empty space around the point (x,y,z) in the world frame"""

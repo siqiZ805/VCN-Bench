@@ -1,13 +1,4 @@
 import os
-world_size = int(os.environ['SLURM_NTASKS'] ) 
-node_id = os.environ['SLURM_NODEID']   
-rank = int(os.environ['SLURM_PROCID']  ) 
-local_rank = int(os.environ['SLURM_LOCALID'])
-node_list = os.environ['SLURM_NODELIST']
-print(f"rank: {rank}, world_size: {world_size}, node_id: {node_id}, local_rank: {local_rank}")
-devices = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
-os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[local_rank//2])
-
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"  # disable warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HABITAT_SIM_LOG"] = (
@@ -15,15 +6,10 @@ os.environ["HABITAT_SIM_LOG"] = (
 )
 os.environ["MAGNUM_LOG"] = "quiet"
 
-'''
-srun -p mozi_t --gres=gpu:4 --cpus-per-task=2 -N 1 --ntasks=48 --unbuffered -J collect_mem_data python run_collect_data.py --cfg_file cfg/collect_data.yaml
-'''
-
 import argparse
 from omegaconf import OmegaConf
 import random
 import numpy as np
-import torch
 import math
 import time
 import json
@@ -32,19 +18,13 @@ import logging
 import matplotlib.pyplot as plt
 import cv2
 
-from src.habitat import pose_habitat_to_tsdf, get_points_from_multigoal, pos_habitat_to_normal, pos_normal_to_habitat
+from src.habitat import pose_habitat_to_tsdf, pos_habitat_to_normal
 from src.geom import get_cam_intr, get_scene_bnds
 from src.scene_memo import Scene
-from src.tsdf_planner import TSDFPlanner, Frontier, SnapShot
-from src.utils import resize_image, calc_agent_subtask_distance, get_pts_angle_goatbench
-from src.logger_goatbench import Logger
-
-from src.query_memo_e2e import query_qwen, build_model
-
-video_root = "/mnt/hwfile/zhangsiqi1/project/MemoNav/data/datasets/myFam/mp3d_human_test/tour_rgb"
-max_frame = 50
-TFRAME = False
-TF_DIR = "/mnt/hwfile/zhangsiqi1/project/MemoNav/Qwen3-VL/qwen-vl-finetune/exp/eval_result/select_frame/8b_50f_0111_8e"
+from src.tsdf_planner import TSDFPlanner, SnapShot
+from src.utils import calc_agent_subtask_distance, get_pts_angle_goatbench
+from src.logger import Logger
+from model.query_dualvln import query_qwen, build_model
 
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
@@ -60,14 +40,13 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     np.random.seed(cfg.seed)
 
     # Load dataset
-    MP3D_SCENE = "/mnt/hwfile/zhangsiqi1/project/vlfm/data/scene_datasets/mp3d"
+    MP3D_SCENE = cfg.mp3d_dir
     scenes = [x for x in os.listdir(MP3D_SCENE) if '.' not in x]
     
     # test data
     file_path = cfg.test_data_path
     with gzip.open(file_path, 'r') as f:
         episodes = json.load(f)['episodes']
-        
     num_episode = len(episodes)
     logging.info(f"Total number of episodes: {num_episode}")
     
@@ -79,30 +58,27 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     logger = Logger(
         cfg.output_dir, start_ratio, end_ratio, split, voxel_size=cfg.tsdf_grid_size
     )
-    # for scene_id in scenes[rank//4 : : world_size//4]:
+    
     for scene_id in scenes:
         scene_data = [x for x in episodes if scene_id in x['scene_id']]
         if scene_data == []:
             continue
         total_episodes = len(scene_data)
         
-        # for episode_idx, episode in enumerate(scene_data[rank%4 : : 4]):
-        for episode_idx, episode in enumerate(scene_data[rank::world_size]):
-            logging.info(f"[{rank}] Episode {episode_idx + 1}/{total_episodes}")
+        for episode_idx, episode in enumerate(scene_data):
+            logging.info(f"Episode {episode_idx + 1}/{total_episodes}")
             logging.info(f"Loading scene {scene_id}")
             episode_id = episode["episode_id"]
             
             if os.path.exists(os.path.join(cfg.output_dir, f"{scene_id}_ep_{episode_id}", 'result.json')):
                 continue
   
-            #* load scene
             try:
                 del scene
             except:
                 pass
             scene = Scene(scene_id, cfg, cfg_cg,)
             
-            #* initialize episode
             pts, angle = get_pts_angle_goatbench(
                 episode["start_position"], episode["start_rotation"]
             )
@@ -119,7 +95,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 pts_init=pts,
                 init_clearance=cfg.init_clearance * 2,
                 save_visualization=cfg.save_visualization,
-            ) #? 初始化，需要用到函数，不会更新点云
+            ) #? just for functions
             tsdf_planner.max_point = None
             tsdf_planner.target_point = None
             
@@ -130,42 +106,30 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             logger.init_task_my(pts, tsdf_planner)
             logging.info(f"\n\nScene {scene_id} initialization successful!")
             
-            #* load prior video
+            # load prior video
             hkey = episode['hkey']
-            video_dir = os.path.join(video_root, scene_id, hkey)
+            video_dir = os.path.join(cfg.video_root, scene_id, hkey)
             all_rgbs = sorted(os.listdir(video_dir))
             sidx = episode['start_idx']
             eidx = episode['end_idx']
             tour_video = all_rgbs[sidx : eidx]
-            #* downsample
+            # downsample
             video_len = eidx - sidx
             step = 1
-            while video_len / step >= 50:
+            while video_len / step >= cfg.video_max_frame:
                 step += 1
             tour_video = tour_video[::step]
-            
-            if TFRAME:
-                path = os.path.join(TF_DIR, episode_id+'.json')
-                if not os.path.exists(path):
-                    tour_video = []
-                else:
-                    llm_result = json.load(open(path, 'r'))
-                    output = llm_result['llm_output'][0]
-                    _out = output.split('Frame:')[-1]
-                    _out = _out.split('.')[0].strip()
-                    pred_frame_idx = int(_out)
-                    tour_video = [tour_video[pred_frame_idx]]
-            
-            #* nav goal
+
+            # nav goal
             _instr = episode['instruction']
             if 'image' in _instr['task_type']:
                 goal = _instr['img_path']
             else:
                 goal = _instr['instruction_text']
             
-            #* run steps
+            # run steps
             global_step = -1
-            my_result = {}
+            save_result = {}
             hist_rgbs = []  # each element is [name, rgb]
             while global_step < num_step - 1:
                 global_step += 1
@@ -180,7 +144,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     angle + angle_increment * (i - total_views // 2)
                     for i in range(total_views)
                 ]
-                #* 按照顺时针
+                # clockwise order
                 all_angles = all_angles[3:] + all_angles[:3]
                 
                 rgb_egocentric_views = []
@@ -189,14 +153,13 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     obs, cam_pose = scene.get_observation(pts, angle=ang)
                     rgb = obs["color_sensor"]
                     depth = obs['depth_sensor']
-                    # rgb = resize_image(rgb, 384, 384)
                     rgb_egocentric_views.append(rgb)
                     depth_list.append(depth)
                     cam_pos, cam_rot = scene.get_cam_pos_rot()
                     cam_pos_list.append(cam_pos)
                     cam_rot_list.append(cam_rot)
                     
-                    #* update scene frames
+                    # update scene frames
                     obs_file_name = f"{global_step}-view_{view_idx}.png"
                     rotation = scene.agent.get_state().rotation
                     rotation = rotation.imag.tolist() + [rotation.real]
@@ -225,12 +188,11 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     scene, cfg, global_step,
                     model, processor, 
                     tour_video, hist_rgbs, rgb_egocentric_views,
-                    video_dir, goal,
-                    tframe=TFRAME
+                    video_dir, cfg.video_root, goal,
                 )
                 if vlm_output_dict is None:
                     break
-                my_result[f"step_{global_step}"] = {
+                save_result[f"step_{global_step}"] = {
                     'hist_rgbs': [x[0] for x in hist_rgbs],
                     'goal': goal,
                     'vlm_output': vlm_output_dict,
@@ -265,7 +227,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 
                 voxel_position = tsdf_planner.normal2voxel(pos_habitat_to_normal(target_position))
                 tsdf_planner.target_point = voxel_position[:2]
-                return_values = tsdf_planner.agent_step_my(
+                return_values = tsdf_planner.agent_step_eval(
                     pts=pts, angle=angle, 
                     pathfinder=scene.pathfinder, cfg=cfg.planner,
                 )
@@ -279,7 +241,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 pts, angle, pts_voxel, target_arrived = return_values
                 logger.log_step(pts_voxel=pts_voxel)
                 logging.info(
-                    f"Current position: {pts}, {logger.subtask_explore_dist:.3f}"
+                    f"Current position: {pts}, {logger.explore_dist:.3f}"
                 )
                 
                 if vlm_output_dict['stop'] == 'true':
@@ -298,16 +260,16 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 logging.info(
                     f"Fail: agent failed to reach the target viewpoint at distance {distance}!"
                 )
-            pl = metadata['gt_dist'] / max(metadata['gt_dist'], logger.subtask_explore_dist)
-            my_result.update({
+            pl = metadata['gt_dist'] / max(metadata['gt_dist'], logger.explore_dist)
+            save_result.update({
                 'final_position': list(pts),
                 'success_by_distance': success_by_distance,
                 'dist_to_goal': distance,
-                'nav_dist': logger.subtask_explore_dist,
+                'nav_dist': logger.explore_dist,
                 'gt_dist': metadata['gt_dist'],
                 'spl_by_distance': success_by_distance * pl
             })
-            logger.save_result_my(my_result)
+            logger.save_result(save_result)
             logging.info(f"Episode {episode_id} finish")
                     
                     

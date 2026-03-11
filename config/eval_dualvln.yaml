@@ -1,13 +1,14 @@
 # General
 seed: 77
-exp_name: "collect_data"
+exp_name: "eval_dualvln"
 output_parent_dir: "/your/exp/parent/dir"
 mp3d_dir: "/path/to/mp3d/scenes"
-file_path: "/your/path/to/instruction/instruction.json.gz"
-region_file_path: "./data/meta_data/scene_floors_sim_mp3d_all.json"
-scene_sum_dir: "./data/vl_ln/scene_summary"
-
+test_data_path: "/your/path/to/instruction/instruction.json.gz"
+video_root: "/your/path/to/tour/video"
+video_max_frame: 50
 concept_graph_config_path: "cfg/concept_graph_default.yaml"
+
+qwen_path: "/path/to/model/ckpt"
 
 # about snapshots clustering
 min_detection: 0
@@ -15,8 +16,8 @@ min_detection: 0
 # camera, image
 camera_height: 1.5
 camera_tilt_deg: -30
-img_width: 640 
-img_height: 640
+img_width: 384
+img_height: 384
 hfov: 90
 
 # about goatbench evaluation
@@ -25,9 +26,9 @@ clear_up_memory_every_subtask: false
 use_full_obj_list: false
 
 # whether to save visualization (which is slow)
-save_visualization: true
+save_visualization: false
 
-# the image size for prompting gpt-4o  #TODO
+# the image size for prompting gpt-4o
 prompt_h: 384
 prompt_w: 384
 
@@ -46,7 +47,7 @@ margin_w_ratio: 0.25
 margin_h_ratio: 0.6
 planner:
   eps: 1
-  max_dist_from_cur_phase_1: 2.5  # when the target object is not found, explore the frontiers with this step length
+  max_dist_from_cur_phase_1: 2  # when the target object is not found, explore the frontiers with this step length
   max_dist_from_cur_phase_2: 3  # when the target object is found, go to the target object with this step length
   final_observe_distance: 1.5  # in phase 2, find a place that is this far from the target object to observe it
   surrounding_explored_radius: 0.7
