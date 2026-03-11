@@ -22,7 +22,7 @@ from src.geom import get_cam_intr, get_scene_bnds
 from src.tsdf_planner import TSDFPlanner, SnapShot
 from src.scene_memo import Scene
 from src.utils import get_pts_angle_goatbench
-from src.logger_collect import Logger
+from loggers.logger_collect import Logger
 
 
 def main(cfg):

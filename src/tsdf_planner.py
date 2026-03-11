@@ -19,7 +19,6 @@ from src.geom import *
 import scipy.ndimage as ndimage
 from src.habitat import pos_normal_to_habitat, pos_habitat_to_normal, get_shortest_from_multigoal, get_points_from_multigoal
 from src.tsdf_base import TSDFPlannerBase
-# from src.conceptgraph.slam.slam_classes import MapObjectDict
 from src.utils import resize_image
 
 
