@@ -183,7 +183,6 @@ class TSDFPlannerBase:
         depth_im,
         cam_intr,
         cam_pose,
-        sem_im=None,
         w_new=None,
         obs_weight=1.0,
         margin_h=240,  # from top

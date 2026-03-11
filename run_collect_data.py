@@ -1,14 +1,4 @@
 import os
-world_size = int(os.environ['SLURM_NTASKS'] ) 
-node_id = os.environ['SLURM_NODEID']   
-rank = int(os.environ['SLURM_PROCID']  ) 
-local_rank = int(os.environ['SLURM_LOCALID'])
-node_list = os.environ['SLURM_NODELIST']
-print(f"rank: {rank}, world_size: {world_size}, node_id: {node_id}, local_rank: {local_rank}")
-devices = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
-idx = int(local_rank) // 12
-os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[idx])
-
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"  # disable warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HABITAT_SIM_LOG"] = (
@@ -16,15 +6,10 @@ os.environ["HABITAT_SIM_LOG"] = (
 )
 os.environ["MAGNUM_LOG"] = "quiet"
 
-'''
-srun -p mozi_t --gres=gpu:4 --cpus-per-task=2 -N 1 --ntasks=48 --unbuffered -J collect_mem_data python run_collect_data.py --cfg_file cfg/collect_data.yaml
-'''
-
 import argparse
 from omegaconf import OmegaConf
 import random
 import numpy as np
-import torch
 import math
 import time
 import json
@@ -34,15 +19,13 @@ import matplotlib.pyplot as plt
 
 from src.habitat import pose_habitat_to_tsdf, get_points_from_multigoal
 from src.geom import get_cam_intr, get_scene_bnds
-from src.tsdf_planner import TSDFPlanner, Frontier, SnapShot
+from src.tsdf_planner import TSDFPlanner, SnapShot
 from src.scene_memo import Scene
-from src.utils import resize_image, calc_agent_subtask_distance, get_pts_angle_goatbench
-# from src.goatbench_utils import prepare_goatbench_navigation_goals
-# from src.query_vlm_goatbench import query_vlm_for_response
-from src.logger_goatbench import Logger
+from src.utils import get_pts_angle_goatbench
+from src.logger_collect import Logger
 
 
-def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
+def main(cfg):
     # load the default concept graph config
     cfg_cg = OmegaConf.load(cfg.concept_graph_config_path)
     OmegaConf.resolve(cfg_cg)
@@ -55,64 +38,28 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     np.random.seed(cfg.seed)
 
     # Load dataset
-    MP3D_SCENE = "/mnt/hwfile/zhangsiqi1/project/vlfm/data/scene_datasets/mp3d"
+    MP3D_SCENE = cfg.mp3d_dir
     scenes = [x for x in os.listdir(MP3D_SCENE) if '.' not in x]
-
-    # if 'full' in cfg.exp_name:
-    #     file = 'full_1120.json.gz'
-    #     idx = cfg.exp_name[4:]
-    # elif 'partial' in cfg.exp_name:
-    #     file = 'partial_1128.json.gz'
-    #     idx = cfg.exp_name[7:]
-    # if idx == '0':
-    #     idx = ''
-    # file_path = f"/mnt/hwfile/zhangsiqi1/project/vlfm/data/datasets/myFam/prior_train{idx}_instructions_v2/{file}"   #!
-    # file_path = "/mnt/hwfile/zhangsiqi1/project/vlfm/data/datasets/myFam/mp3d_human_train/instructions_rep4/full.json.gz"
     file_path = cfg.file_path
     with gzip.open(file_path, 'r') as f:
         episodes = json.load(f)['episodes']
-    
     num_episode = len(episodes)
-    
     logging.info(
         f"Total number of episodes: {num_episode}"
     )
-
-
-    # # load detection and segmentation models
-    # detection_model = YOLOWorld(cfg.yolo_model_name)
-    # logging.info(f"Load YOLO model {cfg.yolo_model_name} successful!")
-
-    # sam_predictor = SAM(cfg.sam_model_name)  # UltraLytics SAM
-    # logging.info(f"Load SAM model {cfg.sam_model_name} successful!")
-
-    # clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-    #     "ViT-B-32", "laion2b_s34b_b79k"  # "ViT-H-14", "laion2b_s32b_b79k"
-    # )
-    # clip_model, clip_preprocess = open_clip.create_model_from_pretrained(
-    #     "ViT-B-32", "/mnt/petrelfs/zhangsiqi1/efm_data/huggingface/CLIP-ViT-B-32-laion2B-s34B-b79K/open_clip_pytorch_model.bin"
-    # )
-    # clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
-    # logging.info(f"Load CLIP model successful!")
-
+    
     # Initialize the logger
     logger = Logger(
-        cfg.output_dir, start_ratio, end_ratio, split, voxel_size=cfg.tsdf_grid_size
+        cfg.output_dir, voxel_size=cfg.tsdf_grid_size
     )
-    # scenes = ['1LXtFkjw3qL']   #! FIXME
-    scenes = scenes[::-1]
-    # random.shuffle(scenes)
-    for scene_id in scenes[rank//12 : : world_size//12]:
+    for scene_id in scenes:
         scene_data = [x for x in episodes if scene_id in x['scene_id']]
         if scene_data == []:
             continue
         total_episodes = len(scene_data)
         
-        scene_data = scene_data[::-1]
-        # random.shuffle(scene_data)
-        for episode_idx, episode in enumerate(scene_data[rank%12 : : 12]):  #! FIXME
-            
-            logging.info(f"[{rank}] Episode {episode_idx + 1}/{total_episodes}")
+        for episode_idx, episode in enumerate(scene_data):
+            logging.info(f"Episode {episode_idx + 1}/{total_episodes}")
             logging.info(f"Loading scene {scene_id}")
             episode_id = episode["episode_id"]
             
@@ -132,10 +79,6 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             except:
                 pass
             scene = Scene(scene_id, cfg, cfg_cg,)
-                # detection_model, sam_predictor,
-                # clip_model, clip_preprocess,
-                # clip_tokenizer,
-            # )
 
             # initialize the TSDF
             floor_height = pts[1]
@@ -155,62 +98,44 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             episode_dir, eps_frontier_dir, eps_snapshot_dir = logger.init_episode(
                 episode_id=f"{scene_id}_ep_{episode_id}"
             )
-            logger.init_task_my(pts, tsdf_planner)
+            logger.init_task(pts, tsdf_planner)
             logging.info(f"\n\nScene {scene_id} initialization successful!")
-            # run questions in the scene
-            global_step = -1
             
-
-            # mapping from the obj id in habitat to the id assigned by concept graph
-            # this mapping/alignment is done by heuristic matching between object masks
-            # goal_obj_ids_mapping = {
-            #     obj_id: [] for obj_id in episode["instance_id"]
-            # }
-
             # run steps
-            task_success = False
             cnt_step = -1
-            n_filtered_snapshots = 0
 
             # reset tsdf planner
             tsdf_planner.max_point = None
             tsdf_planner.target_point = None
             choice = None
 
-            my_result = []
+            save_result = []
             while cnt_step < num_step - 1:
                 cnt_step += 1
-                global_step += 1
                 logging.info(
-                    f"\n== step: {cnt_step}, global step: {global_step} =="
+                    f"\n== step: {cnt_step} =="
                 )
                 dist, _ = get_points_from_multigoal(pts, episode['goals'], scene.pathfinder)
                 step_logdir = {
-                    'step': global_step,
+                    'step': cnt_step,
                     'agent_position': list(pts),
-                    'explore_dist': logger.subtask_explore_dist,
+                    'explore_dist': logger.explore_dist,
                     'dist_to_goal': dist,
                     'snapshots': {}, # {image: {position, rotation, objids} }
                     'frontiers': {}, # {image: {frontier_id, position, orientation} }
                     'choice': [],  # e.g. ['frontier', <imgid>]  
                     'goal_in_choice': False
                 }
-                if len(my_result) > 3 \
-                    and my_result[-3]['dist_to_goal'] < dist \
-                    and my_result[-2]['dist_to_goal'] < dist \
-                    and my_result[-1]['dist_to_goal'] < dist:
+                if len(save_result) > 4 \
+                    and save_result[-4]['dist_to_goal'] < dist \
+                    and save_result[-3]['dist_to_goal'] < dist \
+                    and save_result[-2]['dist_to_goal'] < dist \
+                    and save_result[-1]['dist_to_goal'] < dist:
                     logging.info("-------------- Warning! Getting further from the goal!")
                     break
                     
 
                 #! (1) Observe the surroundings, update the scene graph and occupancy map
-                # Determine the viewing angles for the current step
-                # if cnt_step == 0:
-                #     angle_increment = cfg.extra_view_angle_deg_phase_2 * np.pi / 180  # 40
-                #     total_views = 1 + cfg.extra_view_phase_2   # 1+6
-                # else:
-                #     angle_increment = cfg.extra_view_angle_deg_phase_1 * np.pi / 180  # 60
-                #     total_views = 1 + cfg.extra_view_phase_1   # 1+2
                 angle_increment = 60 * np.pi / 180 
                 total_views = 6
                 all_angles = [
@@ -230,7 +155,6 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     obs, cam_pose = scene.get_observation(pts, angle=ang)
                     rgb = obs["color_sensor"]
                     depth = obs["depth_sensor"]
-                    # semantic_obs = obs["semantic_sensor"]
                     
                     clean_tsdf = TSDFPlanner(vol_bnds=tsdf_bnds, voxel_size=cfg.tsdf_grid_size,
                         floor_height=floor_height, floor_height_offset=0,
@@ -260,19 +184,13 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     )
 
                     # collect all view features
-                    obs_file_name = f"{global_step}-view_{view_idx}.png"
-                    print(logger.episode_dir, obs_file_name)
-                    # if cnt_step == 6:
-                    #     import pdb; pdb.set_trace()
+                    obs_file_name = f"{cnt_step}-view_{view_idx}.png"
                     added_obj_ids = scene.update_scene_graph(
                         pts, clean_tsdf, img_path=obs_file_name
                     )
-                    print(added_obj_ids)
                     scene.all_observations[obs_file_name] = rgb
-                    
-                    # resize_rgb = resize_image(rgb, cfg.prompt_h, cfg.prompt_w)
                     rgb_egocentric_views.append(rgb)
-                    plt.imsave(os.path.join(eps_snapshot_dir, obs_file_name), rgb)
+                    plt.imsave(os.path.join(eps_snapshot_dir, obs_file_name), rgb)  # save current observations
                     all_added_obj_ids += added_obj_ids
                     
                 #! (2) Update Memory Snapshots with hierarchical clustering
@@ -303,7 +221,6 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 )
 
                 #! (3) Update the Frontier Snapshots
-                # import pdb; pdb.set_trace()
                 update_success = tsdf_planner.update_frontier_map(
                     pts=pts,
                     cfg=cfg.planner,
@@ -321,9 +238,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         'orientation': frontier.orientation.tolist(),
                     }
 
-                # # query the VLM for the next navigation point, and the reason for the choice
-                # # set the vlm choice as the navigation target
-                #! (4)
+                #! (4) select according to shortest path
                 if goal_instance in scene.objects:
                     snapshot = [v for k,v in scene.snapshots.items()
                                 if goal_instance in v.cluster][0]
@@ -346,13 +261,12 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         break
                     step_logdir['choice'] = ['frontier', tsdf_planner.max_point.image]
                     
-                print(step_logdir['choice'])
                 choice = tsdf_planner.max_point
                 if isinstance(choice, SnapShot):
                     step_logdir['goal_in_choice'] = goal_instance in choice.full_obj_list
-                my_result.append(step_logdir)
+                save_result.append(step_logdir)
 
-                #! (5) Agent navigate to the target point for one step
+                #! (5) Agent navigate to the target point
                 return_values = tsdf_planner.agent_step(
                     pts=pts,
                     angle=angle,
@@ -373,7 +287,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 pts, angle, pts_voxel, fig, _, target_arrived = return_values
                 logger.log_step(pts_voxel=pts_voxel)
                 logging.info(
-                    f"Current position: {pts}, {logger.subtask_explore_dist:.3f}, Target position: {goal_position}"
+                    f"Current position: {pts}, {logger.explore_dist:.3f}, Target position: {goal_position}"
                 )
 
                 # sanity check about objects, scene graph, snapshots, ...
@@ -382,8 +296,8 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 if cfg.save_visualization:
                     # save the top-down visualization
                     goal_positon = episode['goals'][0]['position']
-                    logger.save_topdown_visualization_my(
-                        global_step=global_step,
+                    logger.save_topdown_visualization(
+                        global_step=cnt_step,
                         goal_pos_voxel = tsdf_planner.habitat2voxel(goal_positon),
                         goal_observed = goal_instance in scene.objects,
                         fig=fig,
@@ -397,19 +311,16 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     caption += f"\nSnapshots: {', '.join(list(scene.snapshots))}"
                     caption += f"\nSelection: {': '.join(step_logdir['choice'])}"
                     logger.save_frontier_visualization(
-                        global_step=global_step,
-                        subtask_id='',
+                        global_step=cnt_step,
                         tsdf_planner=tsdf_planner,
                         max_point_choice=choice,
                         global_caption=caption,
                     )
 
                 #! (6) Check if the agent has arrived at the target to finish the question
-                print('----------------', type(choice), target_arrived, '----------------')
                 if type(choice) == SnapShot and target_arrived:
-                    print(goal_instance in choice.full_obj_list, '----------------')
                     # when the target is a snapshot, and the agent arrives at the target
-                    # we consider the subtask is finished, take an observation and save the chosen target snapshot
+                    # we consider the task is finished, take an observation and save the chosen target snapshot
                     obs, _ = scene.get_observation(pts, angle=angle)
                     rgb = obs["color_sensor"]
                     plt.imsave(
@@ -418,26 +329,14 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         ),
                         rgb,
                     )
-                    # snapshot_filename = choice.image.split(".")[0]
-                    # os.system(
-                    #     f"cp {os.path.join(eps_snapshot_dir, choice.image)} {os.path.join(logger.subtask_object_observe_dir, f'snapshot_{snapshot_filename}.png')}"
-                    # )
                     break
 
-
-            
             # save the results at the end of each episode
-            # logger.save_results()
-            logger.save_result_my(my_result)
+            logger.save_result(save_result)
 
             logging.info(f"Episode {episode_id} finish")
             if not cfg.save_visualization:
                 os.system(f"rm -r {episode_dir}")
-
-    # logger.save_results()
-    # # aggregate the results from different splits into a single file
-    # logger.aggregate_results()
-    
 
     logging.info(f"All scenes finish")
 
@@ -449,7 +348,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_ratio", help="start ratio", default=0.0, type=float)
     parser.add_argument("--end_ratio", help="end ratio", default=1.0, type=float)
     parser.add_argument("--split", help="which episode", default=1, type=int)
-    parser.add_argument("--exp_name", default='', type=str)  #!
+    parser.add_argument("--exp_name", default='', type=str)
     args = parser.parse_args()
     cfg = OmegaConf.load(args.cfg_file)
     OmegaConf.resolve(cfg)

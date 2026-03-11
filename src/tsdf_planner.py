@@ -138,7 +138,7 @@ class TSDFPlanner(TSDFPlannerBase):
         cnt_step: int,
         save_frontier_image: bool = False,
         eps_frontier_dir=None,
-        prompt_img_size: Tuple[int, int] = (338, 338),
+        prompt_img_size: Tuple[int, int] = (384, 384),
         get_image=True
     ) -> bool:
         pts_habitat = pts.copy()

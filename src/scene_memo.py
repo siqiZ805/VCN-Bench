@@ -6,11 +6,10 @@ import random
 import torch
 import habitat_sim
 import quaternion
-from quaternion import as_float_array
 import supervision as sv
 import logging
 from collections import Counter
-from typing import List, Optional, Tuple, Dict, Union
+from typing import List, Optional, Tuple, Dict
 import copy
 import scipy.ndimage as ndimage
 
@@ -28,41 +27,27 @@ from src.geom import get_cam_intr, IoU
 from src.utils import rgba2rgb
 from src.tsdf_planner import SnapShot
 from src.hierarchy_clustering import SceneHierarchicalClustering
-from src.habitat import pos_normal_to_habitat, pos_habitat_to_normal
+from src.habitat import pos_habitat_to_normal
 
 # Local application/library specific imports
 from src.conceptgraph.utils.ious import mask_subtract_contained
 from src.conceptgraph.utils.general_utils import (
     ObjectClasses,
     measure_time,
-    filter_detections,
 )
 from src.conceptgraph.slam.slam_classes import MapObjectDict, DetectionDict, to_tensor
 from src.conceptgraph.slam.utils import (
-    filter_gobs,
     filter_objects,
-    get_bounding_box,
-    init_process_pcd,
     denoise_objects,
     merge_objects,
-    detections_to_obj_pcd_and_bbox,
     processing_needed,
-    resize_gobs,
     merge_obj2_into_obj1,
 )
-from src.conceptgraph.slam.mapping import (
-    compute_spatial_similarities,
-    compute_visual_similarities,
-    aggregate_similarities,
-    match_detections_to_objects,
-)
-from src.conceptgraph.utils.model_utils import compute_clip_features_batched
-
-
 from scipy.spatial.transform import Rotation as R
+
 def camera_to_world(points_cam, cam_pos, cam_rot_quat):
-    # R.from_quat输入是(x,y,z,w)
-    rot_mat_c2w = R.from_quat(cam_rot_quat).as_matrix()  # 相机→世界的旋转矩阵
+    # input for R.from_quat is (x,y,z,w)
+    rot_mat_c2w = R.from_quat(cam_rot_quat).as_matrix()  # cam -> world trans matrix
     world_coords = (rot_mat_c2w @ points_cam.T).T + cam_pos
     return world_coords
 
@@ -73,11 +58,6 @@ class Scene:
         scene_id,
         cfg,
         graph_cfg,
-        # detection_model,
-        # sam_predictor,
-        # clip_model,
-        # clip_preprocess,
-        # clip_tokenizer,
     ):
         self.cfg = cfg
         # concept graph configuration
@@ -86,31 +66,19 @@ class Scene:
         self.scene_id = scene_id
 
         # about the loading the scene
-        MP3D_SCENE = "/mnt/hwfile/zhangsiqi1/project/vlfm/data/scene_datasets/mp3d"
+        MP3D_SCENE = cfg.mp3d_dir
         scene_mesh_path = os.path.join(
             MP3D_SCENE, scene_id, scene_id + ".glb"
         )
         navmesh_path = os.path.join(
             MP3D_SCENE, scene_id, scene_id + ".navmesh"
         )
-        # semantic_texture_path = os.path.join(
-        #     split_path, scene_id, scene_id.split("-")[1] + ".semantic.glb"
-        # )
-        # scene_semantic_annotation_path = os.path.join(
-        #     split_path, scene_id, scene_id.split("-")[1] + ".semantic.txt"
-        # )
         assert os.path.exists(
             scene_mesh_path
         ), f"scene_mesh_path: {scene_mesh_path} does not exist"
         assert os.path.exists(
             navmesh_path
         ), f"navmesh_path: {navmesh_path} does not exist"
-        # assert os.path.exists(
-        #     semantic_texture_path
-        # ), f"semantic_texture_path: {semantic_texture_path} does not exist"
-        # assert os.path.exists(
-        #     scene_semantic_annotation_path
-        # ), f"scene_semantic_annotation_path: {scene_semantic_annotation_path} does not exist"
         
         self.load_regions_and_objects()
         self.skip_objects = ['ceiling', 'floor', 'wall', 'object']
@@ -130,16 +98,6 @@ class Scene:
         self.pathfinder = self.simulator.pathfinder
         self.pathfinder.seed(cfg.seed)
         self.pathfinder.load_nav_mesh(navmesh_path)
-
-        # load object classes
-        # maintain a list of object classes
-        # self.obj_classes = ObjectClasses(
-        #     classes_file_path=scene_semantic_annotation_path,
-        #     bg_classes=self.cfg_cg["bg_classes"],
-        #     skip_bg=self.cfg_cg["skip_bg"],
-        #     class_set=self.cfg["class_set"],
-        # )
-
         logging.info(f"Load scene {scene_id} successfully")
 
         # set agent
@@ -147,12 +105,7 @@ class Scene:
 
         self.cam_intrinsic = get_cam_intr(cfg.hfov, cfg.img_width, cfg.img_height)  # K
 
-        # about scene graph
-        # self.objects: MapObjectDict[int, Dict] = (
-        #     MapObjectDict()
-        # )  # object_id -> object item
-        # self.object_id_counter = 1
-        self.objects = {}  #? {instance_id: {category, object_id, num_detections, bbox} } e.g. "1mp3d_0000_region0/object_25"
+        self.objects = {}  # {instance_id: {category, object_id, num_detections, bbox} } e.g. "1mp3d_0000_region0/object_25"
 
         self.snapshots: Dict[str, SnapShot] = {}  # image_path -> snapshot
         self.frames: Dict[str, SnapShot] = {}  # image_path -> all frames
@@ -164,35 +117,18 @@ class Scene:
             min_sample_split=0,
             random_state=66,
         )
-
-        # # setup detection and segmentation models
-        # self.detection_model = detection_model
-        # self.detection_model.set_classes(self.obj_classes.get_classes_arr())
-
-        # self.sam_predictor = sam_predictor
-
-        # self.clip_model = clip_model.to(self.device)
-        # self.clip_preprocess = clip_preprocess
-        # self.clip_tokenizer = clip_tokenizer
         
     def load_regions_and_objects(self):
-        region_file = "/mnt/hwfile/zhangsiqi1/project/vlfm/data/scene_floors_sim_mp3d_all.json"
+        region_file = self.cfg.region_file_path
         all_regions = json.load(open(region_file, 'r'))
         self.regions = []
         for floor, finfo in all_regions[self.scene_id].items():
             self.regions += finfo['regions']
             
-        # embodiedscan_info = "/mnt/petrelfs/zhangsiqi1/efm_data/data/MMScan/embodiedscan_infos_train_val_test.pkl"
-        # scan_data = np.load(embodiedscan_info, allow_pickle=True)
-        # self.object_data = {region: info for region, info in scan_data.items()
-        #                     if 'matterport3d' in region
-        #                     and self.scene_id in region}
-        # region e.g.: 'matterport3d/ZMojNkEp431/region0'
-        obj_dir = "/mnt/inspurfs/efm_t/huangwensi/vl_ln/vln_llava_data/scene_summary"
+        obj_dir = self.cfg.scene_sum_dir
         self.object_data = json.load(open(
             os.path.join(obj_dir, self.scene_id, 'object_dict.json'), 'r'
         ))
-        # key e.g.: "1mp3d_0000_region0/cabinet_17"
         
     def get_cam_pos_rot(self):
         sensor_state = self.agent.get_state().sensor_states['color_sensor']
@@ -382,7 +318,7 @@ class Scene:
             objid = objinfo['instance_id']
             obj_pixel = tsdf.habitat2voxel(objinfo['position'])
             x, y = obj_pixel[:2]
-            if unocc[x,y] > 0 or obstacle_map_convolved[x,y] > 0:  #? 物体可能在障碍物上
+            if unocc[x,y] > 0 or obstacle_map_convolved[x,y] > 0:  # objects can be on occ
                 frame.full_obj_list[objid] = 1  # objid: confidence
                 if objid not in self.objects:
                     added_obj_ids.append(objid)
