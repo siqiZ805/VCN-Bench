@@ -138,14 +138,14 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 )
                 
                 #* 1. Observe the surroundings, update the scene graph
-                angle_increment = 60 * np.pi / 180 
-                total_views = 6
+                angle_increment = 90 * np.pi / 180 
+                total_views = 4
                 all_angles = [
                     angle + angle_increment * (i - total_views // 2)
                     for i in range(total_views)
                 ]
                 # clockwise order
-                all_angles = all_angles[3:] + all_angles[:3]
+                all_angles = all_angles[2:] + all_angles[:2]
                 
                 rgb_egocentric_views = []
                 depth_list, cam_pos_list, cam_rot_list = [], [], []
@@ -199,21 +199,19 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     'position': list(pts)
                 }
                 
-                view_idx = vlm_output_dict['view_idx']
-                if view_idx < 0 or view_idx > 5:
+                pred_view_idx = vlm_output_dict['view_idx']
+                if pred_view_idx < 0 or pred_view_idx > 3:
                     break
                 
-                if view_idx <= 3:
-                    add_idx = [x for x in range(view_idx+1)]
-                elif view_idx == 4:
-                    add_idx = [0, 5, 4]
-                elif view_idx == 5:
-                    add_idx = [0, 5]
+                if pred_view_idx <=2:
+                    add_idx = [x for x in range(pred_view_idx+1)]
+                elif pred_view_idx == 3:
+                    add_idx = [0, 3]
                 for idx in add_idx:
                     hist_rgbs.append([f"{global_step}-view_{idx}.png", rgb_egocentric_views[idx]])
                     
-                depth = depth_list[view_idx]
-                cam_pos, cam_rot = cam_pos_list[view_idx], cam_rot_list[view_idx]
+                depth = depth_list[pred_view_idx]
+                cam_pos, cam_rot = cam_pos_list[pred_view_idx], cam_rot_list[pred_view_idx]
                 u, v = vlm_output_dict['pixel']
                 if 0<=u<=384 and 0<=v<=384:
                     target_position = scene.pixel_to_point((u,v), depth, cam_pos, cam_rot)

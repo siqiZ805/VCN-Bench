@@ -23,7 +23,8 @@ def build_model(model_path):
 
 
 def format_item(
-    tour_video, hist_rgbs, ego_rgbs,
+    tour_video, hist_rgbs, 
+    init_rgbs, ego_rgbs,
     video_dir, nav_goal
 ):
     source = [
@@ -36,18 +37,19 @@ def format_item(
         
     hist_count = len(hist_rgbs)
     if hist_count > 0:
-        hist_list = [f"{i} <image>" for i in range(hist_count)]
-        source[0]['value'] += f"- Navigation History: {', '.join(hist_list)}"
+        # hist_list = [f"{i} <image>" for i in range(hist_count)]
+        # source[0]['value'] += f"- Navigation History: {', '.join(hist_list)}"
+        source[0]['value'] += "- Navigation History: " + "<image>"*hist_count + '\n'
     else:
         source[0]['value'] += "- Navigation History: None.\n"
         
-    cur_obs_list = [f"{i} <image>" for i in range(6)]
-    source[0]['value'] += f"- Current Observations: {', '.join(cur_obs_list)}\n"
-        
-    if '.png' in nav_goal:
-        source[0]['value'] += f"- Navigation Goal: <image>\n"
-    else:  
-        source[0]['value'] += f"- Navigation Goal: {nav_goal}\n"
+    directions = ['front', 'left', 'back', 'right']
+    init_obs_list = [f"{d}<image>" for d in directions]
+    source[0]['value'] += f"- Initial Observations: {' '.join(init_obs_list)}\n"
+    cur_obs_list = [f"{d} <image>" for d in directions]
+    source[0]['value'] += f"- Current Observations: {' '.join(cur_obs_list)}\n"
+    
+    source[0]['value'] += f"- Navigation Goal: {nav_goal}\n"
         
     source[0]['value'] += '\n' + PROMPT
     
@@ -58,15 +60,10 @@ def format_item(
             'type': 'image',
             'image': transform(Image.open(os.path.join(video_dir, img)).convert('RGB'))
         })
-    for img in [x[1] for x in hist_rgbs] + ego_rgbs:
+    for img in [x[1] for x in hist_rgbs] + init_rgbs + ego_rgbs:
         image_pool.append({
             'type': 'image',
             'image': img
-        })
-    if '.png' in nav_goal:
-        image_pool.append({
-            'type': 'image',
-            'image': transform(Image.open(os.path.join(video_root, nav_goal)).convert('RGB'))
         })
         
     messages = []
@@ -108,7 +105,7 @@ def replace_image_placeholders_batch(
     high_res_len, 
     anchor_token_id=151652, 
     placeholder_token_id=151655, 
-    target_num=4, 
+    target_num=9, 
     pad_token_id=151643
 ):
 
@@ -149,17 +146,18 @@ def replace_image_placeholders_batch(
 
 def query_qwen(
     model, processor,
-    tour_video, hist_rgbs, ego_rgbs,
+    tour_video, hist_rgbs, 
+    init_rgbs, ego_rgbs,
     video_dir, video_root, nav_goal
 ):
-    messages = format_item(tour_video, hist_rgbs, ego_rgbs, video_dir, video_root, nav_goal)
+    messages = format_item(tour_video, hist_rgbs, init_rgbs, ego_rgbs, video_dir, video_root, nav_goal)
     
     inputs = processor.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True,
         return_dict=True, return_tensors='pt'
     )
     
-    high_res_len = 6
+    high_res_len = 4*2
     if '.png' in nav_goal:
         high_res_len += 1
     img_num = inputs['image_grid_thw'].size(0)
@@ -172,7 +170,7 @@ def query_qwen(
     my_grid_thw = []
     for i in range(img_num):
         if i < low_res_len:
-            my_grid_thw.append([1,4,4])
+            my_grid_thw.append([1,6,6])
         else:
             my_grid_thw.append([1,24,24])
     my_grid_thw = torch.Tensor(my_grid_thw).to(dtype=inputs['image_grid_thw'].dtype)
@@ -194,11 +192,13 @@ def query_qwen(
     
     try:
         answer_list = output_text[0].split(' ')
-        _, frame_idx, _, view_idx, _, u, v, _, stop = answer_list
+        _, frame_idx, _, view_direct, _, u, v, _, stop = answer_list
+        
         frame_idx = int(frame_idx.strip())
-        view_idx = int(view_idx.strip())
-        if view_idx < 0 or view_idx > 5:
-            logging.info(f"View_idx {view_idx} out of range.")
+        direct_to_idx = {'front':0, 'left':1, 'back':2, 'right':3}
+        assert view_direct in list(direct_to_idx), view_direct
+        view_idx = direct_to_idx[view_direct.strip().lower()]
+        
         u, v = int(u.strip()), int(v.strip())
         stop = stop.strip().lower()
         if stop not in ['true', 'false']:
@@ -207,6 +207,7 @@ def query_qwen(
             stop = 'true'
         return {
             'pred_frame_idx': frame_idx,
+            'view_direct': view_direct.strip().lower(),
             'view_idx': view_idx,
             'pixel': (u, v),
             'stop': stop

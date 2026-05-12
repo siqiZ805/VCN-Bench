@@ -18,7 +18,7 @@ camera_height: 1.5
 camera_tilt_deg: -30
 img_width: 384
 img_height: 384
-hfov: 90
+hfov: 120
 
 # about goatbench evaluation
 success_distance: 1.0  # the distance threshold for a successful navigation
