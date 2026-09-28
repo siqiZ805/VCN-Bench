@@ -136,8 +136,8 @@ def main(cfg):
                     
 
                 #! (1) Observe the surroundings, update the scene graph and occupancy map
-                angle_increment = 60 * np.pi / 180 
-                total_views = 6
+                angle_increment = 90 * np.pi / 180
+                total_views = 4
                 all_angles = [
                     angle + angle_increment * (i - total_views // 2)
                     for i in range(total_views)
@@ -395,4 +395,4 @@ if __name__ == "__main__":
 
     # run
     logging.info(f"***** Running {cfg.exp_name} *****")
-    main(cfg, start_ratio=args.start_ratio, end_ratio=args.end_ratio, split=args.split)
+    main(cfg)

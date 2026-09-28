@@ -1,4 +1,4 @@
-# VSI-NavBench
+# VCN-Bench
 
 <div align="center">
 
@@ -10,11 +10,15 @@
 
 </div>
 
-Spatial intelligence is the core capability for MLLMs to perform real-world embodied interactions. Existing spatial intelligence benchmarks are restricted to static non-embodied paradigms, while mainstream navigation tasks fail to comprehensively evaluate full-stack spatial capabilities of MLLMs. To address this gap, we present VSI-NavBench, a novel video-contextualized <b>nav</b>igation <b>bench</b>mark for evaluating closed-loop <b>v</b>isual-<b>s</b>patial <b>i</b>ntelligence of MLLMs. Our benchmark takes videos of scenes as global visual-spatial context, with a two-tier evaluation system (i.e. goal identification and navigation) to hierarchically evaluate static and dynamic spatial capabilities. Built on Matterport3D, the benchmark comprises 1,500 episodes for evaluation and 100k for training. MV-DualVLN, which separates spatial intelligence with low-level control, is proposed as a strong baseline. Benchmarking experiments show that even the top closed-source MLLM achieves below 50% success rate on goal identification, with about 20% performance gap between goal identification and navigation, revealing challenges in both upstream spatial cognition and downstream embodied planning.
+Spatial reasoning is fundamental to embodied agents, yet it remains unclear whether spatial understanding can be carried forward to guide sequential interactions.
+Existing spatial-reasoning benchmarks typically terminate at offline predictions, while navigation benchmarks evaluate spatial reasoning as part of instruction following and exploration.
+We introduce VCN-Bench, a <b>V</b>ideo-<b>C</b>ontextualized <b>N</b>avigation benchmark for probing closed-loop spatial reasoning over prior visual experience in MLLMs. Given a prior video covering both the initial location and destination, the agent is tasked with reasoning out the instruction-specified target and navigating toward it with the inferred spatial context. 
+Built on Matterport3D, VCN-Bench contains five instruction types, 100k training episodes, and 1,250 evaluation episodes. Navigation serves as the primary evaluation, while diagnostic goal identification helps distinguish destination-resolution errors from subsequent navigation failures. 
+We further propose MV-DualVLN, a planning-oriented baseline that jointly leverages prior video and in-episode observations. Experiments reveal limited navigation performance, a substantial destination-resolution-to-navigation gap, and frequent navigation failures even after correct destination identification.
 
 <div align="center">
 
-![demo](assets/task_demonstration.png "bench")
+![demo](assets/bench_demonstration.png "bench")
 
 </div>
 
@@ -27,7 +31,7 @@ We test under the following environment:
 
 **Preparing  a conda env with `Python3.9` & Install habitat-sim and habitat-lab**
 ```bash
-conda create -n vsinav python=3.9
+conda create -n vcn python=3.9
 conda install habitat-sim==0.2.5 withbullet headless -c conda-forge -c aihabitat
 git clone --branch v0.2.5 https://github.com/facebookresearch/habitat-lab.git
 cd habitat-lab
@@ -36,16 +40,46 @@ pip install -e habitat-baselines # install habitat_baselines
 ```
 
 
+## 📦 Training Data Collection
+Set `mp3d_dir`, `file_path`, and `output_parent_dir` in `config/collect_data.yaml`, then collect navigation trajectories:
+```bash
+python run_collect_data.py --cfg_file config/collect_data.yaml
+```
+
+Project the chosen frontier or snapshot at each step to a pixel goal. `frontier_dir` is the episode folder produced above (`output_parent_dir/exp_name`):
+```bash
+python frontier_to_pixel.py \
+  --cfg_file config/collect_data.yaml \
+  --frontier_dir /your/path/to/collected/episodes \
+  --instruction /your/path/to/instruction/instruction.json.gz \
+  --output_dir /your/path/to/pixel/labels
+```
+
+If several repeats were collected into subfolders of one root, merge them into a single label file:
+```bash
+python frontier_to_pixel.py --merge --output_root /your/path/to/pixel/labels
+```
 
 
 ## 🤖 Evaluation
-```python
+**MV-DualVLN**
+```bash
 python run_eval_mvdualvln.py --cfg_file config/eval_mvdualvln.yaml
 ```
 
+**Zero-shot 3D-Mem**
+
+Set the scene, instruction, video, and detector checkpoints in `config/eval_3dmem.yaml`, then run:
+```bash
+python run_eval_3dmem.py --cfg_file config/eval_3dmem.yaml
+```
 
 
 ## 📄 License
 <a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-nc-sa/4.0/80x15.png" /></a>
 <br />
 This work is under the <a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/">Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License</a>.
+
+
+## 🙏 Acknowledgement
+The navigation pipeline is built upon [3D-Mem](https://github.com/UMass-Embodied-AGI/3D-Mem) (Yang et al., CVPR 2025). We thank the authors for releasing their code.

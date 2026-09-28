@@ -13,12 +13,12 @@ from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 PROMPT = """First, select the best frame from the "Room Tour Video" as the global target; \
 subsequently, choose a view from "Current Observations" and generate a pixel goal."""
 
-def build_model(model_path):
+def build_model(model_path, processor_path):
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         model_path, dtype=torch.bfloat16, device_map="auto",
         attn_implementation="flash_attention_2"
     )
-    processor = AutoProcessor.from_pretrained(".huggingface/Qwen3-VL-4B-Instruct")
+    processor = AutoProcessor.from_pretrained(processor_path)
     return model, processor
 
 

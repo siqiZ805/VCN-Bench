@@ -35,7 +35,7 @@ class Logger:
         self.pts_voxels = np.vstack(
             [self.pts_voxels, tsdf_planner.habitat2voxel(pts)[:2]]
         )
-        self.subtask_explore_dist = 0.0
+        self.explore_dist = 0.0
         
     def init_eval_task(self, episode, pts, tsdf_planner):
         #* 1. nav goal
@@ -69,7 +69,7 @@ class Logger:
         self.pts_voxels = np.vstack(
             [self.pts_voxels, tsdf_planner.habitat2voxel(pts)[:2]]
         )
-        self.subtask_explore_dist = 0.0
+        self.explore_dist = 0.0
         return metadata
         
     def log_step(self, pts_voxel):

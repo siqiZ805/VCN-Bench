@@ -5,12 +5,12 @@ import random
 import torch
 import habitat_sim
 import quaternion
+from quaternion import as_float_array
 import supervision as sv
 import logging
 from collections import Counter
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Union
 import copy
-import scipy.ndimage as ndimage
 
 from habitat_sim.utils.common import (
     quat_to_coeffs,
@@ -18,7 +18,7 @@ from habitat_sim.utils.common import (
     quat_from_two_vectors,
 )
 from src.habitat import (
-    make_simple_cfg,
+    make_semantic_cfg,
     get_quaternion,
     get_navigable_point_to,
 )
@@ -26,29 +26,34 @@ from src.geom import get_cam_intr, IoU
 from src.utils import rgba2rgb
 from src.tsdf_planner import SnapShot
 from src.hierarchy_clustering import SceneHierarchicalClustering
-from src.habitat import pos_habitat_to_normal
 
 # Local application/library specific imports
 from src.conceptgraph.utils.ious import mask_subtract_contained
 from src.conceptgraph.utils.general_utils import (
     ObjectClasses,
     measure_time,
+    filter_detections,
 )
 from src.conceptgraph.slam.slam_classes import MapObjectDict, DetectionDict, to_tensor
 from src.conceptgraph.slam.utils import (
+    filter_gobs,
     filter_objects,
+    get_bounding_box,
+    init_process_pcd,
     denoise_objects,
     merge_objects,
+    detections_to_obj_pcd_and_bbox,
     processing_needed,
+    resize_gobs,
     merge_obj2_into_obj1,
 )
-from scipy.spatial.transform import Rotation as R
-
-def camera_to_world(points_cam, cam_pos, cam_rot_quat):
-    # input for R.from_quat is (x,y,z,w)
-    rot_mat_c2w = R.from_quat(cam_rot_quat).as_matrix()  # cam -> world trans matrix
-    world_coords = (rot_mat_c2w @ points_cam.T).T + cam_pos
-    return world_coords
+from src.conceptgraph.slam.mapping import (
+    compute_spatial_similarities,
+    compute_visual_similarities,
+    aggregate_similarities,
+    match_detections_to_objects,
+)
+from src.conceptgraph.utils.model_utils import compute_clip_features_batched
 
 
 class Scene:
@@ -57,12 +62,16 @@ class Scene:
         scene_id,
         cfg,
         graph_cfg,
+        detection_model,
+        sam_predictor,
+        clip_model,
+        clip_preprocess,
+        clip_tokenizer,
     ):
         self.cfg = cfg
         # concept graph configuration
         self.cfg_cg = graph_cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.scene_id = scene_id
 
         # about the loading the scene
         MP3D_SCENE = cfg.mp3d_dir
@@ -72,17 +81,7 @@ class Scene:
         navmesh_path = os.path.join(
             MP3D_SCENE, scene_id, scene_id + ".navmesh"
         )
-        assert os.path.exists(
-            scene_mesh_path
-        ), f"scene_mesh_path: {scene_mesh_path} does not exist"
-        assert os.path.exists(
-            navmesh_path
-        ), f"navmesh_path: {navmesh_path} does not exist"
         
-        self.regions = []
-        self.object_data = {}
-        self.skip_objects = ['ceiling', 'floor', 'wall', 'object']
-
         sim_settings = {
             "scene": scene_mesh_path,
             "default_agent": 0,
@@ -90,21 +89,36 @@ class Scene:
             "width": cfg.img_width,
             "height": cfg.img_height,
             "hfov": cfg.hfov,
+            "scene_dataset_config_file": cfg.scene_dataset_config_path,
             "camera_tilt": cfg.camera_tilt_deg * np.pi / 180,
         }
-        sim_cfg = make_simple_cfg(sim_settings)
+        sim_cfg = make_semantic_cfg(sim_settings)
         self.simulator = habitat_sim.Simulator(sim_cfg)
         self.pathfinder = self.simulator.pathfinder
         self.pathfinder.seed(cfg.seed)
         self.pathfinder.load_nav_mesh(navmesh_path)
+
+        # load object classes
+        # maintain a list of object classes
+        self.obj_classes = ObjectClasses(
+            classes_file_path='',
+            bg_classes=self.cfg_cg["bg_classes"],
+            skip_bg=self.cfg_cg["skip_bg"],
+            class_set=self.cfg["class_set"],
+        )
+
         logging.info(f"Load scene {scene_id} successfully")
 
         # set agent
         self.agent = self.simulator.initialize_agent(sim_settings["default_agent"])
 
-        self.cam_intrinsic = get_cam_intr(cfg.hfov, cfg.img_width, cfg.img_height)  # K
+        self.cam_intrinsic = get_cam_intr(cfg.img_width, cfg.img_height, cfg.hfov)
 
-        self.objects = {}  # {instance_id: {category, object_id, num_detections, bbox} } e.g. "1mp3d_0000_region0/object_25"
+        # about scene graph
+        self.objects: MapObjectDict[int, Dict] = (
+            MapObjectDict()
+        )  # object_id -> object item
+        self.object_id_counter = 1
 
         self.snapshots: Dict[str, SnapShot] = {}  # image_path -> snapshot
         self.frames: Dict[str, SnapShot] = {}  # image_path -> all frames
@@ -116,29 +130,16 @@ class Scene:
             min_sample_split=0,
             random_state=66,
         )
-        
-    def get_cam_pos_rot(self):
-        sensor_state = self.agent.get_state().sensor_states['color_sensor']
-        cam_pos = sensor_state.position
-        cam_rot = sensor_state.rotation
-        cam_rot = np.array(cam_rot.imag.tolist() + [cam_rot.real])
-        return cam_pos, cam_rot
-        
-    def pixel_to_point(self, pixel, depth, cam_pos, cam_rot):
-        K = self.cam_intrinsic
-        fx = K[0][0]
-        fy = K[1][1]
-        cx = K[0][2]
-        cy = K[1][2]
-        
-        u, v = pixel
-        cam_z = -depth[v, u]
-        cam_x = (cx-u)/fx * cam_z
-        cam_y = (v-cy) / fy * cam_z
-        cam_coord = np.array([cam_x, cam_y, cam_z])
-        world_pos = camera_to_world(cam_coord, cam_pos, cam_rot)
-        return world_pos
-        
+
+        # setup detection and segmentation models
+        self.detection_model = detection_model
+        self.detection_model.set_classes(self.obj_classes.get_classes_arr())
+
+        self.sam_predictor = sam_predictor
+
+        self.clip_model = clip_model.to(self.device)
+        self.clip_preprocess = clip_preprocess
+        self.clip_tokenizer = clip_tokenizer
 
     def __del__(self):
         try:
@@ -147,8 +148,7 @@ class Scene:
             pass
 
     def clear_up_detections(self):
-        # self.objects = MapObjectDict()
-        self.objects = {}
+        self.objects = MapObjectDict()
         self.object_id_counter = 1
 
         self.snapshots = {}
@@ -276,116 +276,294 @@ class Scene:
             max_dist,
             prev_start_positions,
         )
-        
-    def update_scene_graph(self, pts, tsdf, img_path, ):
-        '''
-        pts is habitat
-        '''
-        rotation = self.agent.get_state().rotation
-        rotation = rotation.imag.tolist() + [rotation.real]
-        frame = SnapShot(
-            image=img_path, color=(random.random(), random.random(), random.random()),
-            obs_point=tsdf.habitat2voxel(pts), 
-            agent_position=pts, agent_rotation=rotation
-        )
-        added_obj_ids = []
-        
-        normal_pts = pos_habitat_to_normal(pts)
-        _, unocc = tsdf.get_island_around_pts(normal_pts, height=1.8)
-        obstacle_map = tsdf.get_obstacle_map(height=1.8)
-        # convolution to get the obstacles together with surroundings
-        kernel_size = int(0.5 / tsdf._voxel_size)
-        kernel = np.ones((kernel_size, kernel_size))
-        obstacle_map_convolved = ndimage.convolve(
-            obstacle_map.astype(float), kernel, mode="constant", cval=0.0
-        )
-        
-        cand_objs = self.filter_obj_with_distance(pts)
-        for objinfo in cand_objs:
-            objid = objinfo['instance_id']
-            obj_pixel = tsdf.habitat2voxel(objinfo['position'])
-            x, y = obj_pixel[:2]
-            if unocc[x,y] > 0 or obstacle_map_convolved[x,y] > 0:  # objects can be on occ
-                frame.full_obj_list[objid] = 1  # objid: confidence
-                if objid not in self.objects:
-                    added_obj_ids.append(objid)
-                    self.objects[objid] = {
-                        'category': objinfo['category'],
-                        'object_id': objid.split('_')[-1],
-                        'bbox': {
-                            'center': objinfo['position'],
-                            'min_point': objinfo['min_points'][:2] + objinfo['max_points'][2:],
-                            'max_point': objinfo['max_points'][:2] + objinfo['min_points'][2:]
-                        },
-                        'num_detections': 1
-                    }
-        self.frames[img_path] = frame
-        return added_obj_ids
-        
-    def get_region_from_point(self, pts, eps=0.1):
-        '''
-        pts is habitat
-        '''
-        return_regions = []
-        for region in self.regions:
-            center = region['region_center']
-            sizes = region['region_sizes']
-            x_min = center[0] - sizes[0] / 2.0
-            y_min = center[1] - sizes[1] / 2.0
-            z_min = center[2] - sizes[2] / 2.0
-            x_max = center[0] + sizes[0] / 2.0
-            y_max = center[1] + sizes[1] / 2.0
-            z_max = center[2] + sizes[2] / 2.0
-            
-            if (x_min - eps <= pts[0] <= x_max + eps) and \
-                (y_min - eps <= pts[1] <= y_max + eps) and \
-                (z_min - eps <= pts[2] <= z_max + eps):
-                return_regions.append(region['region_id'])
-        return return_regions
 
-    def filter_obj_with_distance(self, pts):
+    def update_scene_graph(self,
+        image_rgb: np.ndarray, depth: np.ndarray,
+        intrinsics, cam_pos,
+        pts, pts_voxel,
+        img_path,
+        # frame_idx,
+        # semantic_obs=Optional[np.ndarray],
+        gt_bbox, gt_target_obj_ids=Optional[List[int]],
+    ) -> Tuple[np.ndarray, List[int], Dict[int, int]]:
         '''
-        pts is habitat
+        return annotated image; 
+        the detected object ids in current frame; 
+        the object id of the target object (if detected)
         '''
-        cand_regions = self.get_region_from_point(pts)
-        cand_floors = [x.split('_')[0] for x in cand_regions]
-        cand_floors = list(set(cand_floors))
-        if len(cand_floors) == 1:
-            floor = cand_floors[0]
-            floor_regions = [x for x in self.regions
-                if x['region_id'].startswith(f"{floor}_")]
-        elif len(cand_floors) > 1:
-            floor_regions = [x for x in self.regions
-                if x['region_id'].split('_')[0] in cand_floors]
+        # assert not (
+        #     (semantic_obs is None) ^ (gt_target_obj_ids is None)
+        # ), "semantic_obs and gt_target_obj_ids should be both None or both not None"
+
+        # set up object_classes first
+        obj_classes = self.obj_classes
+
+        # Detect objects
+        results = self.detection_model.predict(image_rgb, conf=0.1, verbose=False)
+        confidences = results[0].boxes.conf.cpu().numpy()
+        detection_class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
+        detection_class_labels = [
+            f"{obj_classes.get_classes_arr()[class_id]} {class_idx}"
+            for class_idx, class_id in enumerate(detection_class_ids)
+        ]
+        xyxy_tensor = results[0].boxes.xyxy
+        xyxy_np = xyxy_tensor.cpu().numpy()
+
+        # if there are detections,
+        # Get Masks Using SAM or MobileSAM
+        # UltraLytics SAM
+        if xyxy_tensor.numel() != 0:
+            sam_out = self.sam_predictor.predict(
+                image_rgb, bboxes=xyxy_tensor, verbose=False
+            )
+            masks_tensor = sam_out[0].masks.data
+
+            masks_np = masks_tensor.cpu().numpy()
         else:
-            floor_regions = self.regions
-        
-        floor_region_ids = [x['region_id'].split('_')[-1] for x in floor_regions]
-        
-        cand_objs = []
-        for objid, objinfo in self.object_data.items():
-            region_id = objid.split('/')[0].split('region')[-1]
-            if region_id not in floor_region_ids:
-                continue
-            if objinfo['category'] in self.skip_objects:
-                continue
-            
-            center = objinfo['position']
-            min_point = objinfo['min_points'][:2] + objinfo['max_points'][2:]
-            max_point = objinfo['max_points'][:2] + objinfo['min_points'][2:]
-            
-            flag = False
-            for point in [center, min_point, max_point]:
-                xy_dist = np.sqrt((pts[0]-point[0])**2 + (pts[2]-point[2])**2)
-                if xy_dist < 3.5 and -1 < point[1] - pts[1] < 3:
-                    flag = True
-                    break
-            if flag:
-                cand_objs.append(objinfo)
-        return cand_objs
+            masks_np = np.empty((0, *image_rgb.shape[:2]), dtype=np.float64)
 
+        # Create a detections object that we will save later
+        curr_det = sv.Detections(
+            xyxy=xyxy_np,
+            confidence=confidences,
+            class_id=detection_class_ids,
+            mask=masks_np,
+        )
+        if len(curr_det) == 0:  # no detections, skip
+            logging.debug("No detections in this frame")
+            return image_rgb, [], {}
 
-    def filter_gobs_with_distance_ori(self, pts, gobs):
+        # filter the detection by removing overlapping detections
+        curr_det, labels = filter_detections(
+            image=image_rgb,
+            detections=curr_det,
+            classes=obj_classes,
+            given_labels=detection_class_labels,
+            iou_threshold=self.cfg_cg.object_detection_iou_threshold,
+            min_mask_size_ratio=self.cfg_cg.min_mask_size_ratio,
+            confidence_threshold=self.cfg_cg.object_detection_confidence_threshold,
+        )
+        if curr_det is None:
+            logging.debug("No detections left after filter_detections")
+            return image_rgb, [], {}
+
+        image_crops, image_feats, text_feats = compute_clip_features_batched(
+            image_rgb,
+            curr_det,
+            self.clip_model,
+            self.clip_preprocess,
+            self.clip_tokenizer,
+            obj_classes.get_classes_arr(),
+            self.device,
+        )
+
+        raw_gobs = {
+            # add new uuid for each detection
+            "xyxy": curr_det.xyxy,
+            "confidence": curr_det.confidence,
+            "class_id": curr_det.class_id,
+            "mask": curr_det.mask,
+            "classes": obj_classes.get_classes_arr(),
+            "image_crops": image_crops,
+            "image_feats": image_feats,
+            "text_feats": text_feats,
+            "detection_class_labels": detection_class_labels,
+        }
+
+        # resize the observation if needed
+        resized_gobs = resize_gobs(raw_gobs, image_rgb)
+        # filter the observations
+        filtered_gobs = filter_gobs(
+            resized_gobs,
+            image_rgb,
+            skip_bg=self.cfg_cg.skip_bg,
+            BG_CLASSES=obj_classes.get_bg_classes_arr(),
+            mask_area_threshold=self.cfg_cg.mask_area_threshold,
+            max_bbox_area_ratio=self.cfg_cg.max_bbox_area_ratio,
+            mask_conf_threshold=self.cfg_cg.mask_conf_threshold,
+        )
+
+        gobs = filtered_gobs
+
+        if len(gobs["mask"]) == 0:  # no detections in this frame
+            logging.debug("No detections left after filter_gobs")
+            return image_rgb, [], {}
+
+        # this helps make sure things like pillows on couches are separate objects
+        gobs["mask"] = mask_subtract_contained(gobs["xyxy"], gobs["mask"])
+
+        obj_pcds_and_bboxes = measure_time(detections_to_obj_pcd_and_bbox)(
+            depth_array=depth,
+            masks=gobs["mask"],
+            cam_K=intrinsics[:3, :3],  # Camera intrinsics
+            image_rgb=image_rgb,
+            trans_pose=cam_pos,
+            min_points_threshold=self.cfg_cg.min_points_threshold,
+            spatial_sim_type=self.cfg_cg.spatial_sim_type,
+            obj_pcd_max_points=self.cfg_cg.obj_pcd_max_points,
+            device=self.device,
+        )
+
+        for obj in obj_pcds_and_bboxes:
+            if obj:
+                obj["pcd"] = init_process_pcd(
+                    pcd=obj["pcd"],
+                    downsample_voxel_size=self.cfg_cg["downsample_voxel_size"],
+                    dbscan_remove_noise=self.cfg_cg["dbscan_remove_noise"],
+                    dbscan_eps=self.cfg_cg["dbscan_eps"],
+                    dbscan_min_points=self.cfg_cg["dbscan_min_points"],
+                )
+                obj["bbox"] = get_bounding_box(
+                    spatial_sim_type=self.cfg_cg["spatial_sim_type"],
+                    pcd=obj["pcd"],
+                )
+        # if the list is all None, then skip
+        if all([obj is None for obj in obj_pcds_and_bboxes]):
+            logging.debug("All objects are None in obj_pcds_and_bboxes")
+            return image_rgb, [], {}
+
+        # add pcds and bboxes to gobs
+        gobs["bbox"] = [
+            obj["bbox"] if obj is not None else None for obj in obj_pcds_and_bboxes
+        ]
+        gobs["pcd"] = [
+            obj["pcd"] if obj is not None else None for obj in obj_pcds_and_bboxes
+        ]
+
+        # filter out objects that are far away
+        gobs = self.filter_gobs_with_distance(pts, gobs)
+        #? dict_keys(['xyxy', 'confidence', 'class_id', 'mask', 'classes', 'image_crops', 'image_feats', 'text_feats', 'detection_class_labels', 'bbox', 'pcd'])
+
+        detection_list = self.make_detection_list_from_pcd_and_gobs(
+            gobs, img_path, obj_classes
+        )
+
+        if len(detection_list) == 0:  # no detections, skip
+            logging.debug(
+                "No detections left after make_detection_list_from_pcd_and_gobs"
+            )
+            return image_rgb, [], {}
+
+        # compare the detections with the target object mask to see whether the target object is detected
+        target_obj_id_mapping = {}
+        # match the target by 3D bbox IoU
+        max_iou , max_iou_obj_id = -1, None
+        for idx, obj_id in enumerate(detection_list.keys()):
+            obj_bbox = detection_list[obj_id]['bbox']
+            center = obj_bbox.center
+            extent = obj_bbox.extent
+            bbox = [
+                center[0] - extent[0] / 2, center[0] + extent[0] / 2, 
+                center[1] - extent[1] / 2, center[1] + extent[1] / 2, 
+                center[2] - extent[2] / 2, center[2] + extent[2] / 2, 
+            ]
+            iou = calcu_3d_iou(gt_bbox, bbox)
+            if iou > max_iou:
+                max_iou = iou
+                max_iou_obj_id = obj_id
+        # if max_iou > self.cfg.scene_graph.target_obj_iou_threshold:
+        if max_iou > 0.2:
+            target_obj_id_mapping[gt_target_obj_ids[0]] = max_iou_obj_id
+            logging.info(
+                f"Target object {gt_target_obj_ids[0]} detected with IoU {max_iou} in {img_path}!!!"
+            )
+
+        # if there exists object detected in this frame, create a snapshot
+        frame = SnapShot(
+            image=img_path,
+            color=(random.random(), random.random(), random.random()),
+            obs_point=pts_voxel,
+        )
+        # add all detected objects into the snapshot
+        frame.full_obj_list = {
+            obj_id: detection_list[obj_id]["conf"] for obj_id in detection_list.keys()
+        }
+
+        det_visual_prompt = sv.Detections(
+            xyxy=gobs["xyxy"],
+            class_id=gobs["class_id"],
+        )
+
+        # if no objects yet in the map,
+        # just add all the objects from the current frame
+        # then continue, no need to match or merge
+        if len(self.objects) == 0:
+            logging.debug(
+                f"No objects in the map yet, adding all detections of length {len(detection_list)}"
+            )
+            self.objects.update(detection_list)
+
+            det_visual_prompt.data["obj_id"] = list(detection_list.keys())
+            frame.visual_prompt = det_visual_prompt
+            self.frames[img_path] = frame
+
+            annotated_image = image_rgb
+            added_obj_ids = list(detection_list.keys())
+        else:
+            ### compute similarities and then merge
+            spatial_sim = compute_spatial_similarities(
+                spatial_sim_type=self.cfg_cg["spatial_sim_type"],
+                detection_list=detection_list,
+                objects=self.objects,
+                downsample_voxel_size=self.cfg_cg["downsample_voxel_size"],
+            )
+
+            visual_sim = compute_visual_similarities(detection_list, self.objects)
+
+            agg_sim = aggregate_similarities(
+                match_method=self.cfg_cg["match_method"],
+                phys_bias=self.cfg_cg["phys_bias"],
+                spatial_sim=spatial_sim,
+                visual_sim=visual_sim,
+            )
+
+            # Perform matching of detections to existing objects
+            match_indices = match_detections_to_objects(
+                agg_sim=agg_sim,
+                detection_threshold=self.cfg_cg[
+                    "sim_threshold"
+                ],  # Use the sim_threshold from the configuration
+                existing_obj_ids=list(self.objects.keys()),
+                detected_obj_ids=list(detection_list.keys()),
+            )
+
+            # Now merge the detected objects into the existing objects based on the match indices
+            visualize_captions, target_obj_id_mapping, added_obj_ids, all_obj_ids = (
+                self.merge_obj_matches(
+                    detection_list=detection_list,
+                    match_indices=match_indices,
+                    obj_classes=obj_classes,
+                    snapshot=frame,
+                    target_obj_id_mapping=target_obj_id_mapping,
+                )
+            )
+
+            det_visual_prompt.data["obj_id"] = all_obj_ids
+            frame.visual_prompt = det_visual_prompt
+
+            # add the snapshot into the snapshot list
+            self.frames[img_path] = frame
+
+            # create a Detection object for visualization
+            det_visualize = sv.Detections(
+                xyxy=gobs["xyxy"],
+                confidence=gobs["confidence"],
+                class_id=gobs["class_id"],
+            )
+            det_visualize.data["class_name"] = visualize_captions
+            annotated_image = image_rgb.copy()
+            BOUNDING_BOX_ANNOTATOR = sv.BoundingBoxAnnotator(thickness=1)
+            LABEL_ANNOTATOR = sv.LabelAnnotator(
+                text_thickness=1, text_scale=0.25, text_color=sv.Color.BLACK
+            )
+            annotated_image = BOUNDING_BOX_ANNOTATOR.annotate(
+                annotated_image, det_visualize
+            )
+            annotated_image = LABEL_ANNOTATOR.annotate(annotated_image, det_visualize)
+
+        return annotated_image, added_obj_ids, target_obj_id_mapping
+
+    def filter_gobs_with_distance(self, pts, gobs):
         idx_to_keep = []
         for idx in range(len(gobs["bbox"])):
             if gobs["bbox"][idx] is None:  # point cloud was discarded
@@ -539,17 +717,17 @@ class Scene:
                 prev_snapshots.pop(filename)
         obj_ids = list(set(obj_ids))
 
-        # # find and exclude the objects that have only one observation
-        # obj_exclude = [
-        #     obj_id
-        #     for obj_id in self.objects.keys()
-        #     if self.objects[obj_id]["num_detections"] < min_detection
-        # ]
-        # obj_ids = [obj_id for obj_id in obj_ids if obj_id not in obj_exclude]
+        # find and exclude the objects that have only one observation
+        obj_exclude = [
+            obj_id
+            for obj_id in self.objects.keys()
+            if self.objects[obj_id]["num_detections"] < min_detection
+        ]
+        obj_ids = [obj_id for obj_id in obj_ids if obj_id not in obj_exclude]
 
         obj_centers = np.zeros((len(obj_ids), 2))
         for i, obj_id in enumerate(obj_ids):
-            obj_centers[i] = np.array(self.objects[obj_id]["bbox"]['center'])[[0, 2]]
+            obj_centers[i] = self.objects[obj_id]["bbox"].center[[0, 2]]
 
         if len(obj_centers) == 0:
             return
@@ -573,10 +751,9 @@ class Scene:
         assert (
             set(obj_ids) & set(prev_snapshot_objs)
         ) == set(), f"{set(obj_ids)} & {set(prev_snapshot_objs)} != empty"
-        assert (set(obj_ids) | set(prev_snapshot_objs)) == set(
+        assert (set(obj_ids) | set(prev_snapshot_objs) | set(obj_exclude)) == set(
             self.objects.keys()
-        ), f"{set(obj_ids)} | {set(prev_snapshot_objs)}  != {set(self.objects.keys())}"
-        # | {set(obj_exclude)}
+        ), f"{set(obj_ids)} | {set(prev_snapshot_objs)} | {set(obj_exclude)} != {set(self.objects.keys())}"
 
         for key, snapshot in new_snapshots.items():
             if key in prev_snapshots.keys():
@@ -756,3 +933,38 @@ class Scene:
             logging.info(f"{snapshot_id}:")
             for obj_str in obj_list:
                 logging.info(f"\t{obj_str}")
+
+def calcu_3d_iou(bbox1, bbox2):
+    x1_min, y1_min, z1_min, x1_max, y1_max, z1_max = bbox1
+    x2_min, y2_min, z2_min, x2_max, y2_max, z2_max = bbox2
+    
+    # intersection bounds
+    inter_x_min = max(x1_min, x2_min)
+    inter_y_min = max(y1_min, y2_min)
+    inter_z_min = max(z1_min, z2_min)
+    inter_x_max = min(x1_max, x2_max)
+    inter_y_max = min(y1_max, y2_max)
+    inter_z_max = min(z1_max, z2_max)
+    
+    # no overlap
+    if (inter_x_min >= inter_x_max or 
+        inter_y_min >= inter_y_max or 
+        inter_z_min >= inter_z_max):
+        return 0.0
+    
+    # intersection volume
+    inter_volume = ((inter_x_max - inter_x_min) * 
+                    (inter_y_max - inter_y_min) * 
+                    (inter_z_max - inter_z_min))
+    
+    # individual volumes
+    vol1 = (x1_max - x1_min) * (y1_max - y1_min) * (z1_max - z1_min)
+    vol2 = (x2_max - x2_min) * (y2_max - y2_min) * (z2_max - z2_min)
+    
+    # union volume
+    union_volume = vol1 + vol2 - inter_volume
+    
+    # IoU
+    iou = inter_volume / union_volume
+    
+    return iou

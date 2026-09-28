@@ -1,12 +1,27 @@
 # General
 seed: 77
-exp_name: "eval_dualvln"
+exp_name: "eval_3dmem"
 output_parent_dir: "/your/exp/parent/dir"
 mp3d_dir: "/path/to/mp3d/scenes"
+# Leave empty when loading MP3D .glb files directly.
+scene_dataset_config_path: ""
 test_data_path: "/your/path/to/instruction/instruction.json.gz"
 video_root: "/your/path/to/tour/video"
 video_max_frame: 50
+
 concept_graph_config_path: "config/concept_graph_default.yaml"
+
+# major settings
+choose_every_step: true  # whether to query vlm at each step, or only after arriving at the navigation target
+egocentric_views: true  # whether to add egocentric views when prompting vlm
+prefiltering: true
+top_k_categories: 10
+
+# about detection model
+yolo_model_name: "/path/to/model/yolov8x-world.pt"
+sam_model_name: "/path/to/model/sam_l.pt"
+clip_model_path: "/path/to/model/CLIP-ViT-B-32/open_clip_pytorch_model.bin"
+class_set: memo
 
 qwen_path: "/path/to/model/ckpt"
 qwen_processor_path: "/path/to/model/Qwen3-VL-4B-Instruct"
@@ -17,8 +32,8 @@ min_detection: 0
 # camera, image
 camera_height: 1.5
 camera_tilt_deg: -30
-img_width: 384
-img_height: 384
+img_width: 1280
+img_height: 1280
 hfov: 120
 
 # about goatbench evaluation
@@ -29,7 +44,7 @@ use_full_obj_list: false
 # whether to save visualization (which is slow)
 save_visualization: false
 
-# the image size for prompting gpt-4o
+# the image size for prompting
 prompt_h: 384
 prompt_w: 384
 
@@ -48,8 +63,8 @@ margin_w_ratio: 0.25
 margin_h_ratio: 0.6
 planner:
   eps: 1
-  max_dist_from_cur_phase_1: 2  # when the target object is not found, explore the frontiers with this step length
-  max_dist_from_cur_phase_2: 3  # when the target object is found, go to the target object with this step length
+  max_dist_from_cur_phase_1: 2.5  # when the target object is not found, explore the frontiers with this step length
+  max_dist_from_cur_phase_2: 2  # when the target object is found, go to the target object with this step length
   final_observe_distance: 1.5  # in phase 2, find a place that is this far from the target object to observe it
   surrounding_explored_radius: 0.7
 

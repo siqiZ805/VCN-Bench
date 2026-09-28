@@ -50,7 +50,8 @@ def make_semantic_cfg(settings):
     # simulator backend
     sim_cfg = habitat_sim.SimulatorConfiguration()
     sim_cfg.scene_id = settings["scene"]
-    sim_cfg.scene_dataset_config_file = settings["scene_dataset_config_file"]
+    if settings.get("scene_dataset_config_file"):
+        sim_cfg.scene_dataset_config_file = settings["scene_dataset_config_file"]
     sim_cfg.load_semantic_mesh = True
 
     # agent
@@ -94,7 +95,8 @@ def make_simple_cfg(settings):
     # simulator backend
     sim_cfg = habitat_sim.SimulatorConfiguration()
     sim_cfg.scene_id = settings["scene"]
-    sim_cfg.scene_dataset_config_file = settings["scene_dataset_config_file"]
+    if settings.get("scene_dataset_config_file"):
+        sim_cfg.scene_dataset_config_file = settings["scene_dataset_config_file"]
 
     # agent
     agent_cfg = habitat_sim.agent.AgentConfiguration()

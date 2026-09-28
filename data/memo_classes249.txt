@@ -1,0 +1,249 @@
+soap
+treadmill
+tablet
+refrigerator
+ceiling
+countertop
+kitchen island
+chair
+box
+table
+bed
+coffee maker
+wardrobe
+water cooler
+cabinet
+coat hanger
+stopcock
+water heater
+commode
+calendar
+couch
+stove
+cart
+bench
+curtain
+basin
+tissue
+decoration
+doorframe
+doorway
+cushion
+flowerpot
+rod
+sign
+soap dish
+bread
+washing machine
+conducting wire
+blanket
+vent
+kettle
+dumbbell
+molding
+jacket
+alarm
+statue
+wire
+seasoning
+remote control
+wall
+stairs
+car
+control
+drum
+laptop
+door knob
+vacuum cleaner
+magazine
+sheet
+radio
+projector
+structure
+chandelier
+beam
+step
+body loofah
+speaker
+clock
+kitchenware
+plug
+lamp
+garbage
+desk
+heater
+adhesive tape
+windowsill
+can
+mask
+ladder
+bicycle
+monitor
+board
+beanbag
+dustpan
+wine
+banister
+telephone
+stick
+radiator
+pool table
+glove
+stall
+urn
+stool
+towel
+pan
+partition
+fireplace
+pillar
+light
+frame
+pipe
+cosmetics
+pedestal
+bathtub
+sink
+ledge
+detergent
+umbrella
+bin
+bucket
+excercise equipment
+arch
+rail
+shower
+roof
+object
+counter
+vanity
+grass
+barricade
+candle
+soap dispenser
+globe
+paper
+hook
+file
+balcony
+ridge
+jar
+computer
+support
+toilet
+mat
+brush
+hanger
+dispenser
+food
+mouse
+copier
+luggage
+air conditioner
+bidet
+thermostat
+cup
+bowl
+sponge
+tool
+shoe
+glass
+utensil
+headboard
+rope
+pot
+ball
+broom
+toilet paper
+camera
+footstool
+purse
+hat
+hamper
+fence
+faucet
+garage door
+pack
+backpack
+blinds
+duct
+washbasin
+person
+trophy
+case
+drawer
+teapot
+scale
+rack
+handle
+stand
+ventilation
+oven
+fire extinguisher
+clothes
+blackboard
+clothes dryer
+fan
+socket
+mailbox
+poster
+shovel
+screen
+shelf
+machine
+container
+tray
+plant
+door
+bag
+dishwasher
+cap
+player
+pad
+basket
+furniture
+microwave
+tissue box
+carpet
+divider
+hair dryer
+mirror
+folder
+album
+shirt
+toy
+window
+ottoman
+pool
+shampoo
+floor
+picture
+book
+printer
+wood
+plate
+notebook
+guitar
+switch
+range hood
+pitcher
+tv
+holder
+fruit
+candlestick
+crib
+keyboard
+baseboard
+pillow
+toiletry
+knife
+bottle
+piano
+panel
+dresser
+bar
+window frame
+column
+vase
+dress
+toaster

@@ -51,12 +51,12 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     logging.info(f"Total number of episodes: {num_episode}")
     
     # model
-    model, processor = build_model(cfg.qwen_path)
+    model, processor = build_model(cfg.qwen_path, cfg.qwen_processor_path)
     logging.info(f"Load QWEN model successful!")
     
     # Initialize the logger
     logger = Logger(
-        cfg.output_dir, start_ratio, end_ratio, split, voxel_size=cfg.tsdf_grid_size
+        cfg.output_dir, voxel_size=cfg.tsdf_grid_size
     )
     
     for scene_id in scenes:
@@ -102,8 +102,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             episode_dir, eps_frontier_dir, eps_snapshot_dir = logger.init_episode(
                 episode_id=f"{scene_id}_ep_{episode_id}"
             )
-            metadata = logger.init_memo_task(episode, pts, tsdf_planner)
-            logger.init_task_my(pts, tsdf_planner)
+            metadata = logger.init_eval_task(episode, pts, tsdf_planner)
             logging.info(f"\n\nScene {scene_id} initialization successful!")
             
             # load prior video

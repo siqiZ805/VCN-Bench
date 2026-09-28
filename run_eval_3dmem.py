@@ -1,14 +1,4 @@
 import os
-world_size = int(os.environ['SLURM_NTASKS'] ) 
-node_id = os.environ['SLURM_NODEID']   
-rank = int(os.environ['SLURM_PROCID']  ) 
-local_rank = int(os.environ['SLURM_LOCALID'])
-node_list = os.environ['SLURM_NODELIST']
-print(f"rank: {rank}, world_size: {world_size}, node_id: {node_id}, local_rank: {local_rank}")
-devices = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
-# idx = int(local_rank) // 12
-os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank//2])
-
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"  # disable warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HABITAT_SIM_LOG"] = (
@@ -37,15 +27,8 @@ from src.geom import get_cam_intr, get_scene_bnds
 from src.tsdf_planner import TSDFPlanner, Frontier, SnapShot
 from src.scene_memo_eval import Scene
 from src.utils import resize_image, calc_agent_subtask_distance, get_pts_angle_goatbench
-# from src.goatbench_utils import prepare_goatbench_navigation_goals
-# from src.query_vlm_goatbench import query_vlm_for_response
-from src.logger_goatbench import Logger
-from src.query_qwen_memo import build_model, prepare_vlm_input_dict, query_qwen
-
-video_root = "/mnt/hwfile/zhangsiqi1/project/MemoNav/data/datasets/myFam/mp3d_human_test/tour_rgb"
-max_frame = 50
-TFRAME = False
-TF_DIR = "/mnt/hwfile/zhangsiqi1/project/MemoNav/Qwen3-VL/qwen-vl-finetune/exp/eval_result/select_frame/8b_50f_0111_8e"
+from src.logger import Logger
+from model.query_3dmem import build_model, prepare_vlm_input_dict, query_qwen
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     # load the default concept graph config
@@ -60,7 +43,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     np.random.seed(cfg.seed)
 
     # Load dataset
-    MP3D_SCENE = "/mnt/hwfile/zhangsiqi1/project/vlfm/data/scene_datasets/mp3d"
+    MP3D_SCENE = cfg.mp3d_dir
     scenes = [x for x in os.listdir(MP3D_SCENE) if '.' not in x]
     with gzip.open(cfg.test_data_path, 'r') as f:
         episodes = json.load(f)['episodes']
@@ -77,35 +60,34 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     logging.info(f"Load SAM model {cfg.sam_model_name} successful!")
 
     clip_model, clip_preprocess = open_clip.create_model_from_pretrained(
-        "ViT-B-32", "/mnt/petrelfs/zhangsiqi1/efm_data/huggingface/CLIP-ViT-B-32-laion2B-s34B-b79K/open_clip_pytorch_model.bin"
+        "ViT-B-32", cfg.clip_model_path
     )
     clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
     logging.info(f"Load CLIP model successful!")
     
-    accelerator, model, processor = build_model(cfg.qwen_path)
+    model, processor = build_model(cfg.qwen_path, cfg.qwen_processor_path)
     logging.info(f"Load QWEN model successful!")
     
     # Initialize the logger
     logger = Logger(
-        cfg.output_dir, start_ratio, end_ratio, split, voxel_size=cfg.tsdf_grid_size
+        cfg.output_dir, voxel_size=cfg.tsdf_grid_size
     )
-    # for scene_id in scenes[rank//4 : : world_size//4]:
     for scene_id in scenes:
         scene_data = [x for x in episodes if scene_id in x['scene_id']]
         if scene_data == []:
             continue
         total_episodes = len(scene_data)
         random.shuffle(scene_data)
-        for episode_idx, episode in enumerate(scene_data[rank::world_size]):
-        # for episode_idx, episode in enumerate(scene_data[rank%4 : : 4]):
+        for episode_idx, episode in enumerate(scene_data):
             
-            logging.info(f"[{rank}] Episode {episode_idx + 1}/{total_episodes}")
+            logging.info(f"Episode {episode_idx + 1}/{total_episodes}")
             logging.info(f"Loading scene {scene_id}")
             episode_id = episode["episode_id"]
             
             #* load finished epids
-            if os.path.exists(os.path.join(cfg.output_dir, f"{scene_id}_ep_{episode_id}", 'result.json')):
-                continue   #! FIXME
+            output_path = os.path.join(cfg.output_dir, f"{scene_id}_ep_{episode_id}", 'result.json')
+            if os.path.exists(output_path):
+                continue
             
             pts, angle = get_pts_angle_goatbench(
                 episode["start_position"], episode["start_rotation"]
@@ -114,31 +96,16 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             
             #* load prior video
             hkey = episode['hkey']
-            video_dir = os.path.join(video_root, scene_id, hkey)
+            video_dir = os.path.join(cfg.video_root, scene_id, hkey)
             all_rgbs = sorted(os.listdir(video_dir))
             sidx = episode['start_idx']
             eidx = episode['end_idx']
-            target_frames = [x for i, x in enumerate(all_rgbs[sidx : eidx]) 
-                            if i in episode['frame_idxs']]
             tour_video = all_rgbs[sidx : eidx]
-            #* downsample
             video_len = eidx - sidx
             step = 1
-            while video_len / step >= max_frame:
+            while video_len / step >= cfg.video_max_frame:
                 step += 1
             tour_video = tour_video[::step]
-            
-            if TFRAME:
-                path = os.path.join(TF_DIR, episode_id+'.json')
-                if not os.path.exists(path):
-                    tour_video = []
-                else:
-                    llm_result = json.load(open(path, 'r'))
-                    output = llm_result['llm_output'][0]
-                    _out = output.split('Frame:')[-1]
-                    _out = _out.split('.')[0].strip()
-                    pred_frame_idx = int(_out)
-                    tour_video = [tour_video[pred_frame_idx]]
             
             #* load scene
             try:
@@ -170,7 +137,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             episode_dir, eps_frontier_dir, eps_snapshot_dir = logger.init_episode(
                 episode_id=f"{scene_id}_ep_{episode_id}"
             )
-            metadata = logger.init_memo_task(episode, pts, tsdf_planner)
+            metadata = logger.init_eval_task(episode, pts, tsdf_planner)
             #? instruction, class, goal_obj_ids, goal_positions_voxel, viewpoints, gt_dist
             logging.info(f"\n\nScene {scene_id} initialization successful!")
             # mapping from the obj id in habitat to the id assigned by concept graph
@@ -198,8 +165,8 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 # else:
                 #     angle_increment = cfg.extra_view_angle_deg_phase_1 * np.pi / 180  # 60
                 #     total_views = 1 + cfg.extra_view_phase_1   # 1+2
-                angle_increment = 60 * np.pi / 180 
-                total_views = 6
+                angle_increment = 90 * np.pi / 180 
+                total_views = 4
                 all_angles = [
                     angle + angle_increment * (i - total_views // 2)
                     for i in range(total_views)
@@ -345,11 +312,10 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         cfg=cfg,
                         verbose=True,
                         global_step=global_step,
-                        tframe=TFRAME
                     )
                     pred_out, max_point_choice = query_qwen(
                         vlm_input_dict, cfg, scene, tsdf_planner,
-                        accelerator, model, processor
+                        model, processor
                     )
                     if max_point_choice is None:
                         logging.info(
@@ -394,7 +360,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         break
                     
                 # (5) Agent navigate to the target point for one step
-                return_values = tsdf_planner.agent_step(
+                return_values = tsdf_planner.agent_step_collect(
                     pts=pts,
                     angle=angle,
                     objects=scene.objects,
@@ -405,7 +371,6 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     save_visualization=cfg.save_visualization,
                 )
                 if return_values[0] is None:
-                    import pdb; pdb.set_trace()
                     logging.info(
                         f"Agent_step failed!"
                     )
@@ -415,7 +380,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 pts, angle, pts_voxel, fig, _, target_arrived = return_values
                 logger.log_step(pts_voxel=pts_voxel)
                 logging.info(
-                    f"Current position: {pts}, {logger.subtask_explore_dist:.3f}"
+                    f"Current position: {pts}, {logger.explore_dist:.3f}"
                 )
 
                 # sanity check about objects, scene graph, snapshots, ...
@@ -426,7 +391,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     goal_positon = episode['goals'][0]['position']
                     goal_instance = episode['instruction']['instance_id'][0]
                     goal_obs = list(goal_obj_ids_mapping.values())[0] != []
-                    logger.save_topdown_visualization_my(
+                    logger.save_topdown_visualization(
                         global_step=global_step,
                         goal_pos_voxel = tsdf_planner.habitat2voxel(goal_positon),
                         goal_observed = goal_obs,
@@ -492,18 +457,18 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 logging.info(
                     f"Fail: agent failed to reach the target viewpoint at distance {agent_subtask_distance}!"
                 )
-            pl = metadata['gt_dist'] / max(metadata['gt_dist'], logger.subtask_explore_dist)
+            pl = metadata['gt_dist'] / max(metadata['gt_dist'], logger.explore_dist)
             my_result.update({
                 'final_position': list(pts),
                 'success_by_snapshot': success_by_snapshot,
                 'success_by_distance': success_by_distance,
                 'dist_to_goal': agent_subtask_distance,
-                'nav_dist': logger.subtask_explore_dist,
+                'nav_dist': logger.explore_dist,
                 'gt_dist': metadata['gt_dist'],
                 'spl_by_snapshot': success_by_snapshot * pl,
                 'spl_by_distance': success_by_distance * pl
             })
-            logger.save_result_my(my_result)
+            logger.save_result(my_result)
             logging.info(f"Episode {episode_id} finish")
                     
 if __name__ == "__main__":
