@@ -39,6 +39,37 @@ pip install -e habitat-lab  # install habitat_lab
 pip install -e habitat-baselines # install habitat_baselines
 ```
 
+Run the commands below from the repository root. Relative paths in the YAML
+configs are resolved from that root, so moving the checkout does not require
+editing Python files. Data and local weights default to `datasets/` and
+`checkpoints/`; generated runs default to `outputs/`. These directories are
+ignored by Git. Set paths in the configs or override the shared defaults:
+
+```bash
+export VCN_MP3D_DIR=/path/to/mp3d
+export VCN_INSTRUCTIONS=/path/to/instructions.json.gz
+export VCN_VIDEO_ROOT=/path/to/tour_rgb
+export VCN_OUTPUT_DIR=/path/to/outputs
+```
+
+Each run saves its resolved settings in `config.yaml`. All three navigation
+entrypoints support `--exp_name`, `--start_ratio`, and `--end_ratio`; the ratios
+select a slice of the instruction list. `--split` labels the log file and does
+not partition episodes on its own.
+
+## Instruction Dataset Construction
+
+If you want to construct instructions by yourself,
+set the scene metadata, viewpoints, tours, trajectories, and output directories
+in `config/construct_instructions.yaml`. Run the tools as modules:
+
+```bash
+python -m bench_construct.gen_instrs.run --mode train --task obj_instance
+python -m bench_construct.gen_instrs.run --mode train --action merge
+python -m bench_construct.gen_instrs.run --mode train --action merge --category_only
+```
+
+
 
 ## 📦 Training Data Collection
 Set `mp3d_dir`, `file_path`, and `output_parent_dir` in `config/collect_data.yaml`, then collect navigation trajectories:
@@ -50,20 +81,24 @@ Project the chosen frontier or snapshot at each step to a pixel goal. `frontier_
 ```bash
 python frontier_to_pixel.py \
   --cfg_file config/collect_data.yaml \
-  --frontier_dir /your/path/to/collected/episodes \
-  --instruction /your/path/to/instruction/instruction.json.gz \
-  --output_dir /your/path/to/pixel/labels
+  --frontier_dir outputs/collect_data \
+  --instruction datasets/test/instructions.json.gz \
+  --output_dir outputs/pixel_labels
 ```
 
 If several repeats were collected into subfolders of one root, merge them into a single label file:
 ```bash
-python frontier_to_pixel.py --merge --output_root /your/path/to/pixel/labels
+python frontier_to_pixel.py --merge --output_root outputs/pixel_labels
 ```
 
 
 ## 🤖 Evaluation
 
 **MV-DualVLN**
+
+Set `VCN_MVDUALVLN_CHECKPOINT` or `qwen_path` to the VCN-finetuned checkpoint.
+This entrypoint uses the custom visual pooling model. The processor defaults
+to the original Qwen3-VL-4B processor.
 ```bash
 python run_eval_mvdualvln.py --cfg_file config/eval_mvdualvln.yaml
 ```

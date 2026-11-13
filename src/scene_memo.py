@@ -1,48 +1,45 @@
-import os
-import numpy as np
-import logging
-import random
-import torch
-import habitat_sim
-import quaternion
-import supervision as sv
-import logging
-from collections import Counter
-from typing import List, Optional, Tuple, Dict
 import copy
-import scipy.ndimage as ndimage
+import logging
+import os
+import random
+from collections import Counter
+from typing import Dict, List, Optional, Tuple
 
+import habitat_sim
+import numpy as np
+import quaternion
+import scipy.ndimage as ndimage
+import supervision as sv
+import torch
 from habitat_sim.utils.common import (
-    quat_to_coeffs,
     quat_from_angle_axis,
     quat_from_two_vectors,
-)
-from src.habitat import (
-    make_simple_cfg,
-    get_quaternion,
-    get_navigable_point_to,
-)
-from src.geom import get_cam_intr, IoU
-from src.utils import rgba2rgb
-from src.tsdf_planner import SnapShot
-from src.hierarchy_clustering import SceneHierarchicalClustering
-from src.habitat import pos_habitat_to_normal
-
-# Local application/library specific imports
-from src.conceptgraph.utils.ious import mask_subtract_contained
-from src.conceptgraph.utils.general_utils import (
-    ObjectClasses,
-    measure_time,
-)
-from src.conceptgraph.slam.slam_classes import MapObjectDict, DetectionDict, to_tensor
-from src.conceptgraph.slam.utils import (
-    filter_objects,
-    denoise_objects,
-    merge_objects,
-    processing_needed,
-    merge_obj2_into_obj1,
+    quat_to_coeffs,
 )
 from scipy.spatial.transform import Rotation as R
+
+from src.conceptgraph.slam.slam_classes import DetectionDict, to_tensor
+from src.conceptgraph.slam.utils import (
+    denoise_objects,
+    filter_objects,
+    merge_obj2_into_obj1,
+    merge_objects,
+    processing_needed,
+)
+
+# Local application/library specific imports
+from src.conceptgraph.utils.general_utils import ObjectClasses, measure_time
+from src.geom import IoU, get_cam_intr
+from src.habitat import (
+    get_navigable_point_to,
+    get_quaternion,
+    make_simple_cfg,
+    pos_habitat_to_normal,
+)
+from src.hierarchy_clustering import SceneHierarchicalClustering
+from src.tsdf_planner import SnapShot
+from src.utils import rgba2rgb
+
 
 def camera_to_world(points_cam, cam_pos, cam_rot_quat):
     # input for R.from_quat is (x,y,z,w)
@@ -66,22 +63,18 @@ class Scene:
 
         # about the loading the scene
         MP3D_SCENE = cfg.mp3d_dir
-        scene_mesh_path = os.path.join(
-            MP3D_SCENE, scene_id, scene_id + ".glb"
-        )
-        navmesh_path = os.path.join(
-            MP3D_SCENE, scene_id, scene_id + ".navmesh"
-        )
+        scene_mesh_path = os.path.join(MP3D_SCENE, scene_id, scene_id + ".glb")
+        navmesh_path = os.path.join(MP3D_SCENE, scene_id, scene_id + ".navmesh")
         assert os.path.exists(
             scene_mesh_path
         ), f"scene_mesh_path: {scene_mesh_path} does not exist"
         assert os.path.exists(
             navmesh_path
         ), f"navmesh_path: {navmesh_path} does not exist"
-        
+
         self.regions = []
         self.object_data = {}
-        self.skip_objects = ['ceiling', 'floor', 'wall', 'object']
+        self.skip_objects = ["ceiling", "floor", "wall", "object"]
 
         sim_settings = {
             "scene": scene_mesh_path,
@@ -102,9 +95,11 @@ class Scene:
         # set agent
         self.agent = self.simulator.initialize_agent(sim_settings["default_agent"])
 
-        self.cam_intrinsic = get_cam_intr(cfg.hfov, cfg.img_width, cfg.img_height)  # K
+        self.cam_intrinsic = get_cam_intr(cfg.hfov, cfg.img_height, cfg.img_width)  # K
 
-        self.objects = {}  # {instance_id: {category, object_id, num_detections, bbox} } e.g. "1mp3d_0000_region0/object_25"
+        self.objects = (
+            {}
+        )  # {instance_id: {category, object_id, num_detections, bbox} } e.g. "1mp3d_0000_region0/object_25"
 
         self.snapshots: Dict[str, SnapShot] = {}  # image_path -> snapshot
         self.frames: Dict[str, SnapShot] = {}  # image_path -> all frames
@@ -116,34 +111,40 @@ class Scene:
             min_sample_split=0,
             random_state=66,
         )
-        
+
     def get_cam_pos_rot(self):
-        sensor_state = self.agent.get_state().sensor_states['color_sensor']
+        sensor_state = self.agent.get_state().sensor_states["color_sensor"]
         cam_pos = sensor_state.position
         cam_rot = sensor_state.rotation
         cam_rot = np.array(cam_rot.imag.tolist() + [cam_rot.real])
         return cam_pos, cam_rot
-        
+
     def pixel_to_point(self, pixel, depth, cam_pos, cam_rot):
         K = self.cam_intrinsic
         fx = K[0][0]
         fy = K[1][1]
         cx = K[0][2]
         cy = K[1][2]
-        
+
         u, v = pixel
         cam_z = -depth[v, u]
-        cam_x = (cx-u)/fx * cam_z
-        cam_y = (v-cy) / fy * cam_z
+        cam_x = (cx - u) / fx * cam_z
+        cam_y = (v - cy) / fy * cam_z
         cam_coord = np.array([cam_x, cam_y, cam_z])
         world_pos = camera_to_world(cam_coord, cam_pos, cam_rot)
         return world_pos
-        
+
+    def close(self):
+        simulator = getattr(self, "simulator", None)
+        if simulator is not None:
+            simulator.close()
+            self.simulator = None
 
     def __del__(self):
+        # A failed constructor or interpreter shutdown may leave dependencies unavailable.
         try:
-            self.simulator.close()
-        except:
+            self.close()
+        except Exception:
             pass
 
     def clear_up_detections(self):
@@ -276,20 +277,27 @@ class Scene:
             max_dist,
             prev_start_positions,
         )
-        
-    def update_scene_graph(self, pts, tsdf, img_path, ):
-        '''
+
+    def update_scene_graph(
+        self,
+        pts,
+        tsdf,
+        img_path,
+    ):
+        """
         pts is habitat
-        '''
+        """
         rotation = self.agent.get_state().rotation
         rotation = rotation.imag.tolist() + [rotation.real]
         frame = SnapShot(
-            image=img_path, color=(random.random(), random.random(), random.random()),
-            obs_point=tsdf.habitat2voxel(pts), 
-            agent_position=pts, agent_rotation=rotation
+            image=img_path,
+            color=(random.random(), random.random(), random.random()),
+            obs_point=tsdf.habitat2voxel(pts),
+            agent_position=pts,
+            agent_rotation=rotation,
         )
         added_obj_ids = []
-        
+
         normal_pts = pos_habitat_to_normal(pts)
         _, unocc = tsdf.get_island_around_pts(normal_pts, height=1.8)
         obstacle_map = tsdf.get_obstacle_map(height=1.8)
@@ -299,91 +307,98 @@ class Scene:
         obstacle_map_convolved = ndimage.convolve(
             obstacle_map.astype(float), kernel, mode="constant", cval=0.0
         )
-        
+
         cand_objs = self.filter_obj_with_distance(pts)
         for objinfo in cand_objs:
-            objid = objinfo['instance_id']
-            obj_pixel = tsdf.habitat2voxel(objinfo['position'])
+            objid = objinfo["instance_id"]
+            obj_pixel = tsdf.habitat2voxel(objinfo["position"])
             x, y = obj_pixel[:2]
-            if unocc[x,y] > 0 or obstacle_map_convolved[x,y] > 0:  # objects can be on occ
+            if (
+                unocc[x, y] > 0 or obstacle_map_convolved[x, y] > 0
+            ):  # objects can be on occ
                 frame.full_obj_list[objid] = 1  # objid: confidence
                 if objid not in self.objects:
                     added_obj_ids.append(objid)
                     self.objects[objid] = {
-                        'category': objinfo['category'],
-                        'object_id': objid.split('_')[-1],
-                        'bbox': {
-                            'center': objinfo['position'],
-                            'min_point': objinfo['min_points'][:2] + objinfo['max_points'][2:],
-                            'max_point': objinfo['max_points'][:2] + objinfo['min_points'][2:]
+                        "category": objinfo["category"],
+                        "object_id": objid.split("_")[-1],
+                        "bbox": {
+                            "center": objinfo["position"],
+                            "min_point": objinfo["min_points"][:2]
+                            + objinfo["max_points"][2:],
+                            "max_point": objinfo["max_points"][:2]
+                            + objinfo["min_points"][2:],
                         },
-                        'num_detections': 1
+                        "num_detections": 1,
                     }
         self.frames[img_path] = frame
         return added_obj_ids
-        
+
     def get_region_from_point(self, pts, eps=0.1):
-        '''
+        """
         pts is habitat
-        '''
+        """
         return_regions = []
         for region in self.regions:
-            center = region['region_center']
-            sizes = region['region_sizes']
+            center = region["region_center"]
+            sizes = region["region_sizes"]
             x_min = center[0] - sizes[0] / 2.0
             y_min = center[1] - sizes[1] / 2.0
             z_min = center[2] - sizes[2] / 2.0
             x_max = center[0] + sizes[0] / 2.0
             y_max = center[1] + sizes[1] / 2.0
             z_max = center[2] + sizes[2] / 2.0
-            
-            if (x_min - eps <= pts[0] <= x_max + eps) and \
-                (y_min - eps <= pts[1] <= y_max + eps) and \
-                (z_min - eps <= pts[2] <= z_max + eps):
-                return_regions.append(region['region_id'])
+
+            if (
+                (x_min - eps <= pts[0] <= x_max + eps)
+                and (y_min - eps <= pts[1] <= y_max + eps)
+                and (z_min - eps <= pts[2] <= z_max + eps)
+            ):
+                return_regions.append(region["region_id"])
         return return_regions
 
     def filter_obj_with_distance(self, pts):
-        '''
+        """
         pts is habitat
-        '''
+        """
         cand_regions = self.get_region_from_point(pts)
-        cand_floors = [x.split('_')[0] for x in cand_regions]
+        cand_floors = [x.split("_")[0] for x in cand_regions]
         cand_floors = list(set(cand_floors))
         if len(cand_floors) == 1:
             floor = cand_floors[0]
-            floor_regions = [x for x in self.regions
-                if x['region_id'].startswith(f"{floor}_")]
+            floor_regions = [
+                x for x in self.regions if x["region_id"].startswith(f"{floor}_")
+            ]
         elif len(cand_floors) > 1:
-            floor_regions = [x for x in self.regions
-                if x['region_id'].split('_')[0] in cand_floors]
+            floor_regions = [
+                x for x in self.regions if x["region_id"].split("_")[0] in cand_floors
+            ]
         else:
             floor_regions = self.regions
-        
-        floor_region_ids = [x['region_id'].split('_')[-1] for x in floor_regions]
-        
+
+        floor_region_ids = [x["region_id"].split("_")[-1] for x in floor_regions]
+
         cand_objs = []
         for objid, objinfo in self.object_data.items():
-            region_id = objid.split('/')[0].split('region')[-1]
+            region_id = objid.split("/")[0].split("region")[-1]
             if region_id not in floor_region_ids:
                 continue
-            if objinfo['category'] in self.skip_objects:
+            if objinfo["category"] in self.skip_objects:
                 continue
-            
-            center = objinfo['position']
-            min_point = objinfo['min_points'][:2] + objinfo['max_points'][2:]
-            max_point = objinfo['max_points'][:2] + objinfo['min_points'][2:]
-            
+
+            center = objinfo["position"]
+            min_point = objinfo["min_points"][:2] + objinfo["max_points"][2:]
+            max_point = objinfo["max_points"][:2] + objinfo["min_points"][2:]
+
             flag = False
             for point in [center, min_point, max_point]:
-                xy_dist = np.sqrt((pts[0]-point[0])**2 + (pts[2]-point[2])**2)
+                xy_dist = np.sqrt((pts[0] - point[0]) ** 2 + (pts[2] - point[2]) ** 2)
                 if xy_dist < 3.5 and -1 < point[1] - pts[1] < 3:
                     flag = True
                     break
             if flag:
                 cand_objs.append(objinfo)
         return cand_objs
-
 
     def filter_gobs_with_distance_ori(self, pts, gobs):
         idx_to_keep = []
@@ -549,7 +564,7 @@ class Scene:
 
         obj_centers = np.zeros((len(obj_ids), 2))
         for i, obj_id in enumerate(obj_ids):
-            obj_centers[i] = np.array(self.objects[obj_id]["bbox"]['center'])[[0, 2]]
+            obj_centers[i] = np.array(self.objects[obj_id]["bbox"]["center"])[[0, 2]]
 
         if len(obj_centers) == 0:
             return

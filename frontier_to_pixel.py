@@ -1,18 +1,19 @@
-import os
 import argparse
-import json
 import gzip
+import json
+import os
+
+import habitat_sim
 import numpy as np
+from habitat_sim.utils.common import quat_from_angle_axis, quat_from_two_vectors
+from omegaconf import OmegaConf
+from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 
-from omegaconf import OmegaConf
-import habitat_sim
-from habitat_sim.utils.common import quat_from_two_vectors, quat_from_angle_axis
-
-from src.habitat import make_simple_cfg
 from src.geom import get_cam_intr
-
-from scipy.spatial.transform import Rotation as R
+from src.habitat import make_simple_cfg
+from src.io_utils import load_json
+from src.runtime import load_config
 
 # Pixel labels are projected into this image resolution.
 IMG_SIZE = 384
@@ -72,7 +73,7 @@ def per_episode(episode_dir, episode_name, K, sim, agent, goal_position):
 
     if not os.path.exists(os.path.join(episode_dir, "target.png")):
         return None
-    data = json.load(open(os.path.join(episode_dir, "result.json"), "r"))
+    data = load_json(os.path.join(episode_dir, "result.json"))
     if data == []:
         return None
     if data[-1]["goal_in_choice"] is False:
@@ -104,7 +105,10 @@ def per_episode(episode_dir, episode_name, K, sim, agent, goal_position):
                     return None
                 elif step_keys == []:
                     agent_rotation = [
-                        prev_rotation.x, prev_rotation.y, prev_rotation.z, prev_rotation.w
+                        prev_rotation.x,
+                        prev_rotation.y,
+                        prev_rotation.z,
+                        prev_rotation.w,
                     ]
                     cur_yaw_deg = np.rad2deg(quaternion_to_yaw(agent_rotation))
                 else:
@@ -112,12 +116,16 @@ def per_episode(episode_dir, episode_name, K, sim, agent, goal_position):
                     view_rotation = snapshots[step_keys[0]]["rotation"]
                     view_yaw_deg = np.rad2deg(quaternion_to_yaw(view_rotation))
                     cur_yaw_deg = view_yaw_deg - REL_VIEW_DEG[view_idx]
-            deg_dist = modify_deg(modify_deg(frontier_yaw_deg) - modify_deg(cur_yaw_deg))
+            deg_dist = modify_deg(
+                modify_deg(frontier_yaw_deg) - modify_deg(cur_yaw_deg)
+            )
             view_diff = [abs(deg_dist - x) for x in REL_VIEW_DEG]
             min_idx = np.argmin(view_diff)
             target_view_idx = min_idx
             snap_yaw_deg = modify_deg(cur_yaw_deg + REL_VIEW_DEG[min_idx])
-            snap_rotation = quat_from_angle_axis(np.deg2rad(snap_yaw_deg), np.array([0, 1, 0]))
+            snap_rotation = quat_from_angle_axis(
+                np.deg2rad(snap_yaw_deg), np.array([0, 1, 0])
+            )
 
             agent_state = habitat_sim.AgentState()
             agent_state.position = agent_position
@@ -136,11 +144,13 @@ def per_episode(episode_dir, episode_name, K, sim, agent, goal_position):
                 print(episode_name)
                 return None
 
-            result.append({
-                "step": step,
-                "view_idx": int(target_view_idx),
-                "pixel": [u, v],
-            })
+            result.append(
+                {
+                    "step": step,
+                    "view_idx": int(target_view_idx),
+                    "pixel": [u, v],
+                }
+            )
             prev_rotation = quat_yaw
         else:
             snap_rotation = snapshots[target_img]["rotation"]
@@ -157,11 +167,13 @@ def per_episode(episode_dir, episode_name, K, sim, agent, goal_position):
             target_cam = world_to_camera(np.array(goal_position), cam_pos, cam_rot)
             u = int(fx * target_cam[0] / target_cam[2] * (-1) + cx)
             v = int(fy * target_cam[1] / target_cam[2] + cy)
-            result.append({
-                "step": step,
-                "view_idx": int(target_img[:-4][-1]),
-                "pixel": [u, v],
-            })
+            result.append(
+                {
+                    "step": step,
+                    "view_idx": int(target_img[:-4][-1]),
+                    "pixel": [u, v],
+                }
+            )
     return result
 
 
@@ -176,17 +188,17 @@ def main(cfg, frontier_dir, instr_path_list, output_dir):
     episodes = {str(x["episode_id"]): x for x in episodes}
 
     episode_names = [
-        name for name in os.listdir(frontier_dir)
+        name
+        for name in os.listdir(frontier_dir)
         if os.path.isdir(os.path.join(frontier_dir, name)) and "_ep_" in name
     ]
     scans = sorted(set(name.split("_ep_")[0] for name in episode_names))
     os.makedirs(output_dir, exist_ok=True)
 
+    sim = None
     for scan in scans:
-        try:
+        if sim is not None:
             sim.close()
-        except Exception:
-            pass
         scene_mesh = os.path.join(mp3d_dir, scan, scan + ".glb")
         navmesh = os.path.join(mp3d_dir, scan, scan + ".navmesh")
         sim_settings = {
@@ -203,7 +215,9 @@ def main(cfg, frontier_dir, instr_path_list, output_dir):
         agent = sim.initialize_agent(sim_settings["default_agent"])
 
         results = {}
-        scan_episodes = [name for name in episode_names if name.startswith(scan + "_ep_")]
+        scan_episodes = [
+            name for name in episode_names if name.startswith(scan + "_ep_")
+        ]
         for episode_name in tqdm(scan_episodes, desc=scan):
             episode_id = episode_name.split("_ep_")[-1]
             goal_position = episodes[episode_id]["goals"][0]["position"]
@@ -222,6 +236,9 @@ def main(cfg, frontier_dir, instr_path_list, output_dir):
         with open(os.path.join(output_dir, scan + ".json"), "w") as f:
             json.dump(results, f)
 
+    if sim is not None:
+        sim.close()
+
 
 def merge_reps(output_root):
     results = {}
@@ -232,7 +249,7 @@ def merge_reps(output_root):
             continue
         files = [name for name in os.listdir(rep_dir) if name.endswith(".json")]
         for file in tqdm(files, desc=rep):
-            data = json.load(open(os.path.join(rep_dir, file), "r"))
+            data = load_json(os.path.join(rep_dir, file))
             total += len(data)
             for ori_id, value in data.items():
                 scene_id, episode_id = ori_id.split("_ep_")
@@ -255,8 +272,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.merge:
+        if not args.output_root:
+            parser.error("--output_root is required with --merge")
         merge_reps(args.output_root)
     else:
-        cfg = OmegaConf.load(args.cfg_file)
-        OmegaConf.resolve(cfg)
+        if not args.frontier_dir or not args.instruction or not args.output_dir:
+            parser.error("--frontier_dir, --instruction, and --output_dir are required")
+        cfg = load_config(args.cfg_file)
         main(cfg, args.frontier_dir, args.instruction, args.output_dir)

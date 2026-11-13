@@ -1,0 +1,19 @@
+# All relative paths are resolved from the repository root.
+common:
+  seed: 77
+  mp3d_dir: ${oc.env:VCN_MP3D_DIR,datasets/mp3d}
+  scene_info_path: ${oc.env:VCN_SCENE_INFO_DIR,datasets/metadata/scene_summary}
+  viewpoints_dir: ${oc.env:VCN_VIEWPOINTS_DIR,datasets/metadata/object_viewpoints}
+  regions_path: ${oc.env:VCN_REGIONS_PATH,datasets/metadata/scene_floors.json}
+  sim_config_path: bench_construct/habitat_utils/sim_config.yaml
+  agent_config_path: bench_construct/habitat_utils/agent_config.yaml
+train:
+  tour_video_root: ${oc.env:VCN_TRAIN_VIDEO_ROOT,datasets/train/tour_rgb}
+  trajectory_dir: ${oc.env:VCN_TRAIN_TRAJECTORY_DIR,datasets/train/shortest_traverse_path}
+  region_dist_path: ${oc.env:VCN_TRAIN_REGION_DIST,datasets/metadata/scene_regions_dists_train.json}
+  output_dir: ${oc.env:VCN_TRAIN_INSTRUCTION_DIR,datasets/train/instructions}
+test:
+  tour_video_root: ${oc.env:VCN_TEST_VIDEO_ROOT,datasets/test/tour_rgb}
+  trajectory_dir: ${oc.env:VCN_TEST_TRAJECTORY_DIR,datasets/test/shortest_traverse_path}
+  region_dist_path: ${oc.env:VCN_TEST_REGION_DIST,datasets/metadata/scene_regions_dists_test.json}
+  output_dir: ${oc.env:VCN_TEST_INSTRUCTION_DIR,datasets/test/instructions}

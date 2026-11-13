@@ -1,8 +1,8 @@
-import numpy as np
-from PIL import Image
 import habitat_sim
-from habitat_sim.utils.common import quat_to_angle_axis, quat_from_coeffs
+import numpy as np
 import quaternion
+from habitat_sim.utils.common import quat_from_coeffs, quat_to_angle_axis
+from PIL import Image
 
 
 def resize_image(image, target_h, target_w):

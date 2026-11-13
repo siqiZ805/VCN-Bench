@@ -1,0 +1,9 @@
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+extend-exclude = "(model/(modeling|configuration)_qwen3_vl\\.py|src/conceptgraph/)"
+
+[tool.isort]
+profile = "black"
+line_length = 88
+skip_glob = ["model/modeling_qwen3_vl.py", "model/configuration_qwen3_vl.py", "src/conceptgraph/*"]

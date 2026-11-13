@@ -26,12 +26,19 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+from typing import List
+
+import habitat_sim
 import numpy as np
 from numba import njit, prange
-from .geom import *
-from .habitat import pos_normal_to_habitat, pos_habitat_to_normal
-import habitat_sim
-from typing import List
+
+from .geom import (
+    get_near_navigable_point,
+    points_in_circle,
+    pos_habitat_to_normal,
+    rigid_transform,
+)
+from .habitat import pos_habitat_to_normal, pos_normal_to_habitat
 
 
 class TSDFPlannerBase:
@@ -202,9 +209,8 @@ class TSDFPlannerBase:
           margin_w (int): The margin from the sides of the image to exclude when integrating explored
         """
         im_h, im_w = depth_im.shape
-        max_dist = 10.0   #!
-
-        # Convert voxel grid coordinates to pixel coordinates
+        max_dist = 10.0
+        # Convert voxel grid coordinates to pixel coordinates.
         cam_pts = rigid_transform(self.cam_pts_pre, np.linalg.inv(cam_pose))
         pix_z = cam_pts[:, 2]
         pix = TSDFPlannerBase.cam2pix(cam_pts, cam_intr)

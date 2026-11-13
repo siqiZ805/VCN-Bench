@@ -1,17 +1,13 @@
+import habitat_sim
 import numpy as np
 import quaternion
-import habitat_sim
-import supervision as sv
-try:
-    from .geom import get_collision_distance, IoU
-except:
-    pass
 from habitat_sim.utils.common import (
-    quat_to_coeffs,
     quat_from_angle_axis,
     quat_from_two_vectors,
-    quat_to_angle_axis,
+    quat_to_coeffs,
 )
+
+from .geom import get_collision_distance
 
 
 def pos_normal_to_habitat(pts):
@@ -332,19 +328,15 @@ def get_shortest_from_multigoal(start_position, end_positions):
         path.requested_start = start_position
         path.requested_end = end
         if not path.find_path(path):
-            results.append({
-                'geo_dist': np.inf, 'points': []
-            })
+            results.append({"geo_dist": np.inf, "points": []})
         else:
-            results.append({
-                'geo_dist': path.geodesic_distance,
-                'points': path.points
-            })
-            
+            results.append({"geo_dist": path.geodesic_distance, "points": path.points})
+
+
 def get_points_from_multigoal(start_position, ep_goal, pathfinder):
-    view_points = [vp['agent_state']['position']
-                    for goal in ep_goal
-                    for vp in goal['view_points']]
+    view_points = [
+        vp["agent_state"]["position"] for goal in ep_goal for vp in goal["view_points"]
+    ]
     path = habitat_sim.MultiGoalShortestPath()
     path.requested_start = start_position
     path.requested_ends = view_points

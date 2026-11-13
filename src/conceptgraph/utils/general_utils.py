@@ -778,7 +778,7 @@ class ObjectClasses:
 
         elif self.class_set == "scannet200":
             # load scannet 200 class
-            self.classes_file_path = Path("data/scannet200_classes.txt")
+            self.classes_file_path = Path(__file__).resolve().parents[3] / "data/scannet200_classes.txt"
             with open(self.classes_file_path, "r") as f:
                 all_lines = [cls.strip() for cls in f.readlines()]
                 all_classes = list(set(all_lines))
@@ -788,7 +788,7 @@ class ObjectClasses:
                 )
         elif self.class_set == 'memo':
             # load memo classes
-            self.classes_file_path = Path("data/memo_classes249.txt")
+            self.classes_file_path = Path(__file__).resolve().parents[3] / "data/memo_classes249.txt"
             with open(self.classes_file_path, "r") as f:
                 all_lines = [cls.strip() for cls in f.readlines()]
                 all_classes = list(set(all_lines))
@@ -798,8 +798,10 @@ class ObjectClasses:
                 )
         else:
             # load finetune yolo class
-            self.classes_file_path = "yolo_finetune/class_id_to_class_name.json"
-            class_id_to_class_name = json.load(open(self.classes_file_path, "r"))
+            if not self.classes_file_path:
+                raise ValueError("classes_file_path is required for a custom class set")
+            with open(self.classes_file_path, "r") as stream:
+                class_id_to_class_name = json.load(stream)
             all_classes = list(class_id_to_class_name.values())
             logging.info(
                 f"Loaded {len(all_classes)} classes from yolo finetune class: {self.classes_file_path}!!!"

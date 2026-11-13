@@ -1,9 +1,10 @@
+# Paths may be overridden by environment variables; relative paths use the repository root.
 # General
 seed: 77
 exp_name: "collect_data"
-output_parent_dir: "/your/exp/parent/dir"
-mp3d_dir: "/path/to/mp3d/scenes"
-file_path: "/your/path/to/instruction/instruction.json.gz"
+output_parent_dir: ${oc.env:VCN_OUTPUT_DIR,outputs}
+mp3d_dir: ${oc.env:VCN_MP3D_DIR,datasets/mp3d}
+file_path: ${oc.env:VCN_INSTRUCTIONS,datasets/test/instructions.json.gz}
 
 concept_graph_config_path: "config/concept_graph_default.yaml"
 

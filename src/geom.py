@@ -1,9 +1,7 @@
-import numpy as np
-import random
-import scipy.ndimage as ndimage
-import heapq
-import math
 import logging
+import random
+
+import numpy as np
 from sklearn.cluster import DBSCAN
 
 
@@ -195,7 +193,7 @@ def get_proper_observe_point_with_pathfinder(target_point_habitat, pathfinder, h
                 circle_center=target_point_habitat,
                 radius=1.0,
             )
-        except:
+        except (RuntimeError, ValueError):
             logging.error(
                 f"Error in get_proper_observe_point_with_pathfinder: pathfinder failed to find a navigable point!"
             )
@@ -596,7 +594,7 @@ def get_random_snapshot_observation_point(
             potential_obs_point = valid_coords[
                 np.random.choice(len(valid_coords), p=selection_weight)
             ]
-        except:
+        except (RuntimeError, ValueError):
             # really need to figure out why this happens
             logging.error(
                 f"Error in get_random_snapshot_observation_point: random choice failed!"
@@ -682,7 +680,7 @@ def get_near_navigable_point(p, pathfinder, radius=0.2):
                 circle_center=snapped_p,
                 radius=radius,
             )
-        except:
+        except (RuntimeError, ValueError):
             logging.error(
                 f"Error in get_near_navigable_point: pathfinder failed to find a navigable point!"
             )

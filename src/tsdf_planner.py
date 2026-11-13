@@ -1,23 +1,39 @@
-import os.path
 import copy
+import logging
+import os.path
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple
 
-import numpy as np
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
+import numpy as np
+import scipy.ndimage as ndimage
+import torch
+from matplotlib.patches import FancyArrowPatch, Wedge
+from scipy import stats
 from skimage import measure
 from sklearn.cluster import DBSCAN, KMeans
-from scipy import stats
-import torch
-import habitat_sim
-from typing import List, Tuple, Optional, Dict, Union
-from dataclasses import dataclass, field
-import supervision as sv
-from matplotlib.patches import Wedge
-from matplotlib.patches import FancyArrowPatch
-import matplotlib.patheffects as pe
 
-from src.geom import *
-import scipy.ndimage as ndimage
-from src.habitat import pos_normal_to_habitat, pos_habitat_to_normal, get_shortest_from_multigoal, get_points_from_multigoal
+from src.geom import (
+    IoU,
+    adjust_navigation_point,
+    get_angle_span,
+    get_collision_distance,
+    get_nearest_true_point,
+    get_proper_observe_point,
+    get_proper_observe_point_with_pathfinder,
+    get_proper_snapshot_observation_point,
+    get_random_observe_point,
+    get_random_snapshot_observation_point,
+    get_warping_gap,
+    pix_diff,
+    pos_habitat_to_normal,
+)
+from src.habitat import (
+    get_points_from_multigoal,
+    pos_habitat_to_normal,
+    pos_normal_to_habitat,
+)
 from src.tsdf_base import TSDFPlannerBase
 from src.utils import resize_image
 
@@ -66,11 +82,12 @@ class SnapShot:
     )  # object id to confidence
     cluster: List[int] = field(default_factory=list)
     # position: np.ndarray = None
-    agent_position: np.ndarray = None # agent_state.position
-    agent_rotation: List[float] = field(default_factory=list) # x,y,z, w
+    agent_position: np.ndarray = None  # agent_state.position
+    agent_rotation: List[float] = field(default_factory=list)  # x,y,z, w
 
     def __eq__(self, other):
         raise NotImplementedError("Cannot compare SnapShot objects.")
+
 
 class TSDFPlanner(TSDFPlannerBase):
     """Volumetric TSDF Fusion of RGB-D Images. No GPU mode.
@@ -138,7 +155,7 @@ class TSDFPlanner(TSDFPlannerBase):
         save_frontier_image: bool = False,
         eps_frontier_dir=None,
         prompt_img_size: Tuple[int, int] = (384, 384),
-        get_image=True
+        get_image=True,
     ) -> bool:
         pts_habitat = pts.copy()
         pts = pos_habitat_to_normal(pts)
@@ -167,13 +184,15 @@ class TSDFPlanner(TSDFPlannerBase):
 
         # detect and update frontiers
         frontier_areas = np.argwhere(
-            island & 
+            island
+            &
             # unoccupied &
             (unexplored_neighbors >= cfg.frontier_area_min)
             & (unexplored_neighbors <= cfg.frontier_area_max)
         )
         frontier_edge_areas = np.argwhere(
-            island & 
+            island
+            &
             # unoccupied &
             (unexplored_neighbors >= cfg.frontier_edge_area_min)
             & (unexplored_neighbors <= cfg.frontier_edge_area_max)
@@ -437,9 +456,9 @@ class TSDFPlanner(TSDFPlannerBase):
 
     def set_next_navigation_point(
         self,
-        choice,#: Union[SnapShot, Frontier],
+        choice,  #: Union[SnapShot, Frontier],
         pts,
-        objects,#: MapObjectDict[int, Dict],
+        objects,  #: MapObjectDict[int, Dict],
         cfg,
         pathfinder,
         random_position=False,
@@ -545,7 +564,7 @@ class TSDFPlanner(TSDFPlannerBase):
 
                 self.target_point = target_point
                 return True
-            
+
         elif type(choice) == Frontier:
             # find the direction into unexplored
             ft_direction = self.max_point.orientation
@@ -573,17 +592,17 @@ class TSDFPlanner(TSDFPlannerBase):
                 f"Error in find_next_pose_with_path: wrong choice type: {type(choice)}"
             )
             return False
-        
+
     def set_snapshot_as_next_point(self, cfg, pts, snapshot, scene):
         self.max_point = snapshot
-        
+
         objects = scene.objects
         pathfinder = scene.pathfinder
-        
+
         pts = pos_habitat_to_normal(pts)
         cur_point = self.normal2voxel(pts)
-        
-        obj_centers = [objects[obj_id]["bbox"]['center'] for obj_id in snapshot.cluster]
+
+        obj_centers = [objects[obj_id]["bbox"]["center"] for obj_id in snapshot.cluster]
         obj_centers = [self.habitat2voxel(center)[:2] for center in obj_centers]
         obj_centers = list(
             set([tuple(center) for center in obj_centers])
@@ -591,12 +610,14 @@ class TSDFPlanner(TSDFPlannerBase):
         obj_centers = np.asarray(obj_centers)
         snapshot_center = np.mean(obj_centers, axis=0)
         snapshot.position = snapshot_center
-        
+
         if len(obj_centers) == 1:
             # if there is only one object in the snapshot, then the target point is the object center
             # the target navigation point is deterministic
             target_navigable_point = get_proper_observe_point(
-                snapshot_center, self.unoccupied, cur_point=cur_point,
+                snapshot_center,
+                self.unoccupied,
+                cur_point=cur_point,
                 dist=cfg.final_observe_distance / self._voxel_size,
             )
             if target_navigable_point is None:
@@ -639,16 +660,16 @@ class TSDFPlanner(TSDFPlannerBase):
             return True
 
     def choose_frontier_and_set_next_point(self, pts, cfg, scene, ep_goal):
-        
+
         pathfinder = scene.pathfinder
         objects = scene.objects
-        
+
         pts_habitat = copy.deepcopy(pts)
         pts = pos_habitat_to_normal(pts)
         cur_point = self.normal2voxel(pts)
-        
+
         nav_points = []  # each element should be: {type, idx, pixel}
-        
+
         for fidx, frontier in enumerate(self.frontiers):
             direction = frontier.orientation
             # find an unoccupied point between the agent and the frontier
@@ -666,14 +687,13 @@ class TSDFPlanner(TSDFPlannerBase):
                         f"Error in set_next_navigation_point: cannot find a proper next point"
                     )
                     return False
-            nav_points.append({
-                'type': 'frontier', 'idx': fidx,
-                'pixel': next_point.astype(int)
-            })
-        
+            nav_points.append(
+                {"type": "frontier", "idx": fidx, "pixel": next_point.astype(int)}
+            )
+
         min_dist, target_point = np.inf, None
         for point in nav_points:
-            habitat_point = self.voxel2habitat(point['pixel'])
+            habitat_point = self.voxel2habitat(point["pixel"])
             dist, _ = get_points_from_multigoal(habitat_point, ep_goal, pathfinder)
             if dist < min_dist:
                 min_dist = dist
@@ -682,13 +702,13 @@ class TSDFPlanner(TSDFPlannerBase):
                 # if point['type'] == 'snapshot':
                 #     self.max_point = scene.snapshots[point['idx']]
                 # else:
-                self.max_point = self.frontiers[point['idx']]
+                self.max_point = self.frontiers[point["idx"]]
         if target_point is None:
             return False
-        self.target_point = target_point['pixel']
-            
+        self.target_point = target_point["pixel"]
+
         return True
-    
+
     def agent_step_eval(self, pts, angle, pathfinder, cfg):
         if self.target_point is None:
             logging.error(
@@ -701,14 +721,14 @@ class TSDFPlanner(TSDFPlannerBase):
         dist, path_to_target = self.get_distance(
             cur_point[:2], self.target_point, height=pts[2], pathfinder=pathfinder
         )
-        
+
         island, unoccupied = self.get_island_around_pts(
             pts, height=self.occupancy_height
         )
         self.unoccupied = unoccupied
         self.island = island
         self.occupied = np.logical_not(unoccupied).astype(int)
-        
+
         if dist > max_dist_from_cur:
             target_arrived = False
             if path_to_target is not None:
@@ -758,11 +778,13 @@ class TSDFPlanner(TSDFPlannerBase):
                     not self.check_within_bnds(next_point)
                     or not self.island[
                         # int(np.round(next_point[0])), int(np.round(next_point[1]))
-                        int(next_point[0]), int(next_point[1])
+                        int(next_point[0]),
+                        int(next_point[1]),
                     ]
                     or self.occupied[
                         # int(np.round(next_point[0])), int(np.round(next_point[1]))
-                        int(next_point[0]), int(next_point[1])
+                        int(next_point[0]),
+                        int(next_point[1]),
                     ]
                 ):
                     next_point -= walk_dir
@@ -777,7 +799,6 @@ class TSDFPlanner(TSDFPlannerBase):
             target_arrived = True
             next_point = self.target_point.copy()
 
-        
         next_point_old = next_point.copy()
         next_point = adjust_navigation_point(
             next_point,
@@ -785,7 +806,7 @@ class TSDFPlanner(TSDFPlannerBase):
             voxel_size=self._voxel_size,
             max_adjust_distance=0.1,
         )
-        
+
         if target_arrived:
             direction = self.target_point - cur_point[:2]
         else:
@@ -799,7 +820,7 @@ class TSDFPlanner(TSDFPlannerBase):
             )
             direction = self.rad2vector(angle)
         direction = direction / np.linalg.norm(direction)
-        
+
         # Convert back to world coordinates
         next_point_normal = next_point * self._voxel_size + self._vol_origin[:2]
 
@@ -825,13 +846,12 @@ class TSDFPlanner(TSDFPlannerBase):
             target_arrived,
         )
 
-
     def agent_step_collect(
         self,
         pts,
         angle,
-        objects,#: MapObjectDict[int, Dict],
-        snapshots,#: Dict[str, SnapShot],
+        objects,  #: MapObjectDict[int, Dict],
+        snapshots,  #: Dict[str, SnapShot],
         pathfinder,
         cfg,
         path_points=None,
@@ -992,13 +1012,13 @@ class TSDFPlanner(TSDFPlannerBase):
             updated_path_points,
             target_arrived,
         )
-        
+
     def visualize(self, pts, angle, objects, snapshots, brief=False, height=1.8):
-        '''
+        """
         pts: output of pos_habitat_to_normal
-        '''
+        """
         cur_point = self.normal2voxel(pts)
-        
+
         h, w = self._tsdf_vol_cpu.shape[:2]
         h = 8 * h / w
         arr_scale = (
@@ -1025,8 +1045,7 @@ class TSDFPlanner(TSDFPlannerBase):
         ft_map[unoccupied_high > 0] = [200, 200, 200]
         ft_map[(self.unexplored == 0) & (unoccupied_high > 0)] = [194, 246, 198]
         ft_map[
-            (obstacle_map_convolved > 0)
-            & (obstacle_map_convolved < kernel_size**2 / 2)
+            (obstacle_map_convolved > 0) & (obstacle_map_convolved < kernel_size**2 / 2)
         ] = [100, 100, 100]
         ft_map[(obstacle_map_convolved >= kernel_size**2 / 2)] = [0, 0, 0]
 
@@ -1068,7 +1087,7 @@ class TSDFPlanner(TSDFPlannerBase):
                 mutation_scale=1,
             )
         #################################3
-        
+
         if brief:
             return fig
         #################################3
@@ -1077,10 +1096,10 @@ class TSDFPlanner(TSDFPlannerBase):
             obs_point = snapshot.obs_point[:2]
             try:
                 obj_points = [
-                    self.habitat2voxel(objects[obj_id]["bbox"]['center'])[:2]
+                    self.habitat2voxel(objects[obj_id]["bbox"]["center"])[:2]
                     for obj_id in snapshot.cluster
                 ]
-            except:
+            except (KeyError, TypeError):
                 obj_points = [
                     self.habitat2voxel(objects[obj_id]["bbox"].center)[:2]
                     for obj_id in snapshot.cluster
@@ -1136,17 +1155,17 @@ class TSDFPlanner(TSDFPlannerBase):
 
             for obj_id in snapshot.cluster:
                 try:
-                    obj_vox = self.habitat2voxel(objects[obj_id]["bbox"]['center'])
-                except:
+                    obj_vox = self.habitat2voxel(objects[obj_id]["bbox"]["center"])
+                except (KeyError, TypeError):
                     obj_vox = self.habitat2voxel(objects[obj_id]["bbox"].center)
-                    
+
                 ax1.scatter(obj_vox[1], obj_vox[0], color=snapshot.color, s=30)
 
         if type(self.max_point) == SnapShot:
             for obj_id in self.max_point.cluster:
                 try:
-                    obj_vox = self.habitat2voxel(objects[obj_id]["bbox"]['center'])
-                except:
+                    obj_vox = self.habitat2voxel(objects[obj_id]["bbox"]["center"])
+                except (KeyError, TypeError):
                     obj_vox = self.habitat2voxel(objects[obj_id]["bbox"].center)
                 ax1.scatter(obj_vox[1], obj_vox[0], color="r", s=30)
 
@@ -1201,7 +1220,7 @@ class TSDFPlanner(TSDFPlannerBase):
         unoccupied = np.logical_and(
             self._tsdf_vol_cpu[:, :, height_voxel] > 0, self._tsdf_vol_cpu[:, :, 0] < 0
         )  # check there is ground below
-            # unoccupied = self._tsdf_vol_cpu[:, :, height_voxel] > 0
+        # unoccupied = self._tsdf_vol_cpu[:, :, height_voxel] > 0
 
         # Set initial pose to be free
         for point in self.init_points:

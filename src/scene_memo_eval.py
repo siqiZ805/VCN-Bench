@@ -1,59 +1,54 @@
-import os
-import numpy as np
-import logging
-import random
-import torch
-import habitat_sim
-import quaternion
-from quaternion import as_float_array
-import supervision as sv
-import logging
-from collections import Counter
-from typing import List, Optional, Tuple, Dict, Union
 import copy
+import logging
+import os
+import random
+from collections import Counter
+from typing import Dict, List, Optional, Tuple
 
+import habitat_sim
+import numpy as np
+import quaternion
+import supervision as sv
+import torch
 from habitat_sim.utils.common import (
-    quat_to_coeffs,
     quat_from_angle_axis,
     quat_from_two_vectors,
+    quat_to_coeffs,
 )
-from src.habitat import (
-    make_semantic_cfg,
-    get_quaternion,
-    get_navigable_point_to,
-)
-from src.geom import get_cam_intr, IoU
-from src.utils import rgba2rgb
-from src.tsdf_planner import SnapShot
-from src.hierarchy_clustering import SceneHierarchicalClustering
 
-# Local application/library specific imports
-from src.conceptgraph.utils.ious import mask_subtract_contained
-from src.conceptgraph.utils.general_utils import (
-    ObjectClasses,
-    measure_time,
-    filter_detections,
+from src.conceptgraph.slam.mapping import (
+    aggregate_similarities,
+    compute_spatial_similarities,
+    compute_visual_similarities,
+    match_detections_to_objects,
 )
-from src.conceptgraph.slam.slam_classes import MapObjectDict, DetectionDict, to_tensor
+from src.conceptgraph.slam.slam_classes import DetectionDict, MapObjectDict, to_tensor
 from src.conceptgraph.slam.utils import (
+    denoise_objects,
+    detections_to_obj_pcd_and_bbox,
     filter_gobs,
     filter_objects,
     get_bounding_box,
     init_process_pcd,
-    denoise_objects,
+    merge_obj2_into_obj1,
     merge_objects,
-    detections_to_obj_pcd_and_bbox,
     processing_needed,
     resize_gobs,
-    merge_obj2_into_obj1,
 )
-from src.conceptgraph.slam.mapping import (
-    compute_spatial_similarities,
-    compute_visual_similarities,
-    aggregate_similarities,
-    match_detections_to_objects,
+from src.conceptgraph.utils.general_utils import (
+    ObjectClasses,
+    filter_detections,
+    measure_time,
 )
+
+# Local application/library specific imports
+from src.conceptgraph.utils.ious import mask_subtract_contained
 from src.conceptgraph.utils.model_utils import compute_clip_features_batched
+from src.geom import IoU, get_cam_intr
+from src.habitat import get_navigable_point_to, get_quaternion, make_semantic_cfg
+from src.hierarchy_clustering import SceneHierarchicalClustering
+from src.tsdf_planner import SnapShot
+from src.utils import rgba2rgb
 
 
 class Scene:
@@ -75,13 +70,9 @@ class Scene:
 
         # about the loading the scene
         MP3D_SCENE = cfg.mp3d_dir
-        scene_mesh_path = os.path.join(
-            MP3D_SCENE, scene_id, scene_id + ".glb"
-        )
-        navmesh_path = os.path.join(
-            MP3D_SCENE, scene_id, scene_id + ".navmesh"
-        )
-        
+        scene_mesh_path = os.path.join(MP3D_SCENE, scene_id, scene_id + ".glb")
+        navmesh_path = os.path.join(MP3D_SCENE, scene_id, scene_id + ".navmesh")
+
         sim_settings = {
             "scene": scene_mesh_path,
             "default_agent": 0,
@@ -101,7 +92,7 @@ class Scene:
         # load object classes
         # maintain a list of object classes
         self.obj_classes = ObjectClasses(
-            classes_file_path='',
+            classes_file_path="",
             bg_classes=self.cfg_cg["bg_classes"],
             skip_bg=self.cfg_cg["skip_bg"],
             class_set=self.cfg["class_set"],
@@ -112,7 +103,7 @@ class Scene:
         # set agent
         self.agent = self.simulator.initialize_agent(sim_settings["default_agent"])
 
-        self.cam_intrinsic = get_cam_intr(cfg.img_width, cfg.img_height, cfg.hfov)
+        self.cam_intrinsic = get_cam_intr(cfg.hfov, cfg.img_height, cfg.img_width)
 
         # about scene graph
         self.objects: MapObjectDict[int, Dict] = (
@@ -141,10 +132,17 @@ class Scene:
         self.clip_preprocess = clip_preprocess
         self.clip_tokenizer = clip_tokenizer
 
+    def close(self):
+        simulator = getattr(self, "simulator", None)
+        if simulator is not None:
+            simulator.close()
+            self.simulator = None
+
     def __del__(self):
+        # A failed constructor or interpreter shutdown may leave dependencies unavailable.
         try:
-            self.simulator.close()
-        except:
+            self.close()
+        except Exception:
             pass
 
     def clear_up_detections(self):
@@ -277,20 +275,25 @@ class Scene:
             prev_start_positions,
         )
 
-    def update_scene_graph(self,
-        image_rgb: np.ndarray, depth: np.ndarray,
-        intrinsics, cam_pos,
-        pts, pts_voxel,
+    def update_scene_graph(
+        self,
+        image_rgb: np.ndarray,
+        depth: np.ndarray,
+        intrinsics,
+        cam_pos,
+        pts,
+        pts_voxel,
         img_path,
         # frame_idx,
         # semantic_obs=Optional[np.ndarray],
-        gt_bbox, gt_target_obj_ids=Optional[List[int]],
+        gt_bbox,
+        gt_target_obj_ids=Optional[List[int]],
     ) -> Tuple[np.ndarray, List[int], Dict[int, int]]:
-        '''
-        return annotated image; 
-        the detected object ids in current frame; 
+        """
+        return annotated image;
+        the detected object ids in current frame;
         the object id of the target object (if detected)
-        '''
+        """
         # assert not (
         #     (semantic_obs is None) ^ (gt_target_obj_ids is None)
         # ), "semantic_obs and gt_target_obj_ids should be both None or both not None"
@@ -432,7 +435,7 @@ class Scene:
 
         # filter out objects that are far away
         gobs = self.filter_gobs_with_distance(pts, gobs)
-        #? dict_keys(['xyxy', 'confidence', 'class_id', 'mask', 'classes', 'image_crops', 'image_feats', 'text_feats', 'detection_class_labels', 'bbox', 'pcd'])
+        # dict_keys(['xyxy', 'confidence', 'class_id', 'mask', 'classes', 'image_crops', 'image_feats', 'text_feats', 'detection_class_labels', 'bbox', 'pcd'])
 
         detection_list = self.make_detection_list_from_pcd_and_gobs(
             gobs, img_path, obj_classes
@@ -447,15 +450,18 @@ class Scene:
         # compare the detections with the target object mask to see whether the target object is detected
         target_obj_id_mapping = {}
         # match the target by 3D bbox IoU
-        max_iou , max_iou_obj_id = -1, None
+        max_iou, max_iou_obj_id = -1, None
         for idx, obj_id in enumerate(detection_list.keys()):
-            obj_bbox = detection_list[obj_id]['bbox']
+            obj_bbox = detection_list[obj_id]["bbox"]
             center = obj_bbox.center
             extent = obj_bbox.extent
             bbox = [
-                center[0] - extent[0] / 2, center[0] + extent[0] / 2, 
-                center[1] - extent[1] / 2, center[1] + extent[1] / 2, 
-                center[2] - extent[2] / 2, center[2] + extent[2] / 2, 
+                center[0] - extent[0] / 2,
+                center[0] + extent[0] / 2,
+                center[1] - extent[1] / 2,
+                center[1] + extent[1] / 2,
+                center[2] - extent[2] / 2,
+                center[2] + extent[2] / 2,
             ]
             iou = calcu_3d_iou(gt_bbox, bbox)
             if iou > max_iou:
@@ -934,10 +940,11 @@ class Scene:
             for obj_str in obj_list:
                 logging.info(f"\t{obj_str}")
 
+
 def calcu_3d_iou(bbox1, bbox2):
     x1_min, y1_min, z1_min, x1_max, y1_max, z1_max = bbox1
     x2_min, y2_min, z2_min, x2_max, y2_max, z2_max = bbox2
-    
+
     # intersection bounds
     inter_x_min = max(x1_min, x2_min)
     inter_y_min = max(y1_min, y2_min)
@@ -945,26 +952,30 @@ def calcu_3d_iou(bbox1, bbox2):
     inter_x_max = min(x1_max, x2_max)
     inter_y_max = min(y1_max, y2_max)
     inter_z_max = min(z1_max, z2_max)
-    
+
     # no overlap
-    if (inter_x_min >= inter_x_max or 
-        inter_y_min >= inter_y_max or 
-        inter_z_min >= inter_z_max):
+    if (
+        inter_x_min >= inter_x_max
+        or inter_y_min >= inter_y_max
+        or inter_z_min >= inter_z_max
+    ):
         return 0.0
-    
+
     # intersection volume
-    inter_volume = ((inter_x_max - inter_x_min) * 
-                    (inter_y_max - inter_y_min) * 
-                    (inter_z_max - inter_z_min))
-    
+    inter_volume = (
+        (inter_x_max - inter_x_min)
+        * (inter_y_max - inter_y_min)
+        * (inter_z_max - inter_z_min)
+    )
+
     # individual volumes
     vol1 = (x1_max - x1_min) * (y1_max - y1_min) * (z1_max - z1_min)
     vol2 = (x2_max - x2_min) * (y2_max - y2_min) * (z2_max - z2_min)
-    
+
     # union volume
     union_volume = vol1 + vol2 - inter_volume
-    
+
     # IoU
     iou = inter_volume / union_volume
-    
+
     return iou

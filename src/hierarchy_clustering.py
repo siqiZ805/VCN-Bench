@@ -26,8 +26,6 @@ Implementation of the clustering algorithms, members of the HiPart package.
 
 import HiPart.__utility_functions as util
 import numpy as np
-import statsmodels.api as sm
-
 from HiPart.__partition_class import Partition
 from sklearn.cluster import KMeans
 from treelib import Tree

@@ -41,6 +41,7 @@ from transformers.utils import TransformersKwargs, auto_docstring, is_torchdynam
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
 from .configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
+from .visual_tokens import pool_image_features
 
 
 class Qwen3VLVisionMLP(nn.Module):
@@ -1124,6 +1125,11 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         r"""
         image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
             The temporal, height and width of feature shape of each image in LLM.
+        high_res_mask (`torch.BoolTensor` of shape `(num_images,)`, *optional*):
+            Per-image resolution labels retained for MV-DualVLN generation compatibility.
+        my_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+            Target image grids before spatial merging, used for feature pooling and rotary positions.
+            Images with an unchanged grid retain their full-resolution features.
         video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
             The temporal, height and width of feature shape of each video in LLM.
         """
@@ -1140,44 +1146,19 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             
-            num_images = image_grid_thw.shape[0]  # img num
-            hidden_dim = image_embeds.shape[-1]
-            pool_layer = torch.nn.AvgPool2d(kernel_size=6, stride=6, padding=0)
-            
-            processed_embeds = []
-            for img_idx in range(num_images):
-                ori_patch_num = 1*12*12
-                single_img_embed = image_embeds[img_idx*ori_patch_num : (img_idx+1)*ori_patch_num]
-                if high_res_mask[img_idx]:
-                    processed_single_embed = single_img_embed
-                else:
-                    img_embed = single_img_embed.reshape(1, 12, 12, hidden_dim).permute(0, 3, 1, 2)
-                    img_embed_pooled = pool_layer(img_embed)
-                    processed_single_embed = img_embed_pooled.permute(0,2,3,1).reshape(-1, hidden_dim)
-                processed_embeds.append(processed_single_embed)
-            image_embeds = torch.cat(processed_embeds, dim=0)
-            
+            target_grid = my_grid_thw if my_grid_thw is not None else image_grid_thw
+            merge_size = self.visual.spatial_merge_size
+            image_embeds = pool_image_features(image_embeds, image_grid_thw, target_grid, merge_size)
+
             image_mask, _ = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
             )
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
             
-            deepstack_image_embeds_pooled = []
-            for ds_embed in deepstack_image_embeds:
-                processed_ds_embeds = []
-                for img_idx in range(num_images):
-                    ori_patch_num = 1*12*12
-                    single_ds_embed = ds_embed[img_idx*ori_patch_num : (img_idx+1)*ori_patch_num]
-                    if high_res_mask[img_idx]:
-                        processed_single_ds = single_ds_embed
-                    else:
-                        sing_ds_embed = single_ds_embed.reshape(1, 12, 12, hidden_dim).permute(0,3,1,2)
-                        sing_ds_embed_pooled = pool_layer(sing_ds_embed)
-                        processed_single_ds = sing_ds_embed_pooled.permute(0,2,3,1).reshape(-1, hidden_dim)
-                    processed_ds_embeds.append(processed_single_ds)
-                deepstack_image_embeds_pooled.append(torch.cat(processed_ds_embeds, dim=0))
-            deepstack_image_embeds = deepstack_image_embeds_pooled
-            
+            deepstack_image_embeds = [
+                pool_image_features(features, image_grid_thw, target_grid, merge_size)
+                for features in deepstack_image_embeds
+            ]
 
         if pixel_values_videos is not None:
             video_embeds, deepstack_video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
@@ -1237,7 +1218,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
                 position_ids, rope_deltas = self.get_rope_index(
                     input_ids,
-                    my_grid_thw,   #!
+                    my_grid_thw if my_grid_thw is not None else image_grid_thw,
                     video_grid_thw,
                     attention_mask=attention_mask_tensor,
                 )

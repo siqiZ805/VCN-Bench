@@ -1,12 +1,13 @@
+# Paths may be overridden by environment variables; relative paths use the repository root.
 # General
 seed: 77
 exp_name: "eval_3dmem_qwen3vl_4b_object_v1_uniform_tour"
-output_parent_dir: "/your/exp/parent/dir"
-mp3d_dir: "/path/to/mp3d/scenes"
+output_parent_dir: ${oc.env:VCN_OUTPUT_DIR,outputs}
+mp3d_dir: ${oc.env:VCN_MP3D_DIR,datasets/mp3d}
 # Leave empty when loading MP3D .glb files directly.
 scene_dataset_config_path: ""
-test_data_path: "/your/path/to/instruction/instruction.json.gz"
-video_root: "/your/path/to/tour/video"
+test_data_path: ${oc.env:VCN_INSTRUCTIONS,datasets/test/instructions.json.gz}
+video_root: ${oc.env:VCN_VIDEO_ROOT,datasets/test/tour_rgb}
 video_max_frame: 50  # keep all frames up to this limit; otherwise sample evenly including first/last
 
 concept_graph_config_path: "config/concept_graph_default.yaml"
@@ -18,15 +19,15 @@ prefiltering: true  # zero-shot Qwen category ranking before joint snapshot/obje
 top_k_categories: 10
 
 # about detection model
-yolo_model_name: "/path/to/model/yolov8x-world.pt"
-sam_model_name: "/path/to/model/sam_l.pt"
-clip_model_path: "/path/to/model/CLIP-ViT-B-32/open_clip_pytorch_model.bin"
+yolo_model_name: ${oc.env:VCN_YOLO_PATH,checkpoints/yolov8x-world.pt}
+sam_model_name: ${oc.env:VCN_SAM_PATH,checkpoints/sam_l.pt}
+clip_model_path: ${oc.env:VCN_CLIP_PATH,checkpoints/CLIP-ViT-B-32/open_clip_pytorch_model.bin}
 class_set: memo
 
 # Original instruction-tuned checkpoints, without VCN finetuning or custom token pooling.
 # For 8B, change qwen_path to Qwen/Qwen3-VL-8B-Instruct (or its local directory)
 # and use a distinct exp_name. The processor defaults to the same checkpoint.
-qwen_path: "Qwen/Qwen3-VL-4B-Instruct"
+qwen_path: ${oc.env:VCN_QWEN_CHECKPOINT,Qwen/Qwen3-VL-4B-Instruct}
 qwen_processor_path: null
 
 # about snapshots clustering
