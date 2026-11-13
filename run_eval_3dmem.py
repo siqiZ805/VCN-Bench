@@ -18,6 +18,7 @@ import gzip
 import logging
 import matplotlib.pyplot as plt
 from pprint import pprint
+from pathlib import Path
 
 import open_clip
 from ultralytics import SAM, YOLOWorld
@@ -28,9 +29,19 @@ from src.tsdf_planner import TSDFPlanner, Frontier, SnapShot
 from src.scene_memo_eval import Scene
 from src.utils import resize_image, calc_agent_subtask_distance, get_pts_angle_goatbench
 from src.logger import Logger
-from model.query_3dmem import build_model, prepare_vlm_input_dict, query_qwen
+from src.tour_video import sample_tour_video
+from model.query_3dmem import (
+    build_model, evaluation_identity, prepare_vlm_input_dict, query_qwen,
+    result_is_reusable,
+)
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
+    identity = evaluation_identity(OmegaConf.to_container(cfg, resolve=True))
+    # Reject incompatible cached results before loading any model weights.
+    for result_path in Path(cfg.output_dir).glob("*_ep_*/result.json"):
+        with result_path.open() as stream:
+            result_is_reusable(json.load(stream), identity)
+
     # load the default concept graph config
     cfg_cg = OmegaConf.load(cfg.concept_graph_config_path)
     OmegaConf.resolve(cfg_cg)
@@ -65,7 +76,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
     clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
     logging.info(f"Load CLIP model successful!")
     
-    model, processor = build_model(cfg.qwen_path, cfg.qwen_processor_path)
+    model, processor = build_model(cfg.qwen_path, cfg.get("qwen_processor_path"))
     logging.info(f"Load QWEN model successful!")
     
     # Initialize the logger
@@ -87,7 +98,10 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             #* load finished epids
             output_path = os.path.join(cfg.output_dir, f"{scene_id}_ep_{episode_id}", 'result.json')
             if os.path.exists(output_path):
-                continue
+                with open(output_path) as stream:
+                    if result_is_reusable(json.load(stream), identity):
+                        continue
+                logging.info("Retrying episode with a previously recorded evaluation error")
             
             pts, angle = get_pts_angle_goatbench(
                 episode["start_position"], episode["start_rotation"]
@@ -101,11 +115,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             sidx = episode['start_idx']
             eidx = episode['end_idx']
             tour_video = all_rgbs[sidx : eidx]
-            video_len = eidx - sidx
-            step = 1
-            while video_len / step >= cfg.video_max_frame:
-                step += 1
-            tour_video = tour_video[::step]
+            tour_video = sample_tour_video(tour_video, cfg.video_max_frame)
             
             #* load scene
             try:
@@ -150,7 +160,15 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             #* run step
             global_step = -1
             task_success = False
-            my_result = {}
+            my_result = {
+                **identity,
+                "model_checkpoint": cfg.qwen_path,
+                "processor_checkpoint": cfg.get("qwen_processor_path") or cfg.qwen_path,
+                "prior_video_frames": tour_video,
+                "goal": metadata["goal"],
+                "evaluation_status": "completed",
+                "failure_reason": None,
+            }
             while global_step < num_step - 1:
                 global_step += 1
                 logging.info(
@@ -303,31 +321,35 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     and tsdf_planner.target_point is None
                 ):
                     # query the VLM for the next navigation point, and the reason for the choice
-                    vlm_input_dict = prepare_vlm_input_dict(
-                        metadata=metadata,
-                        scene=scene,
-                        tsdf_planner=tsdf_planner,
-                        rgb_egocentric_views=rgb_egocentric_views,
-                        tour_video=tour_video, video_dir=video_dir,
-                        cfg=cfg,
-                        verbose=True,
-                        global_step=global_step,
-                    )
-                    pred_out, max_point_choice = query_qwen(
-                        vlm_input_dict, cfg, scene, tsdf_planner,
-                        model, processor
-                    )
-                    if max_point_choice is None:
-                        logging.info(
-                            f"Invalid: query_qwen failed!"
+                    try:
+                        vlm_input_dict = prepare_vlm_input_dict(
+                            metadata=metadata,
+                            scene=scene,
+                            tsdf_planner=tsdf_planner,
+                            rgb_egocentric_views=rgb_egocentric_views,
+                            tour_video=tour_video, video_dir=video_dir,
+                            cfg=cfg,
+                            verbose=True,
+                            global_step=global_step,
                         )
-                        break
+                        pred_out, max_point_choice = query_qwen(
+                            vlm_input_dict, cfg, scene, tsdf_planner,
+                            model, processor,
+                        )
+                    except Exception as error:
+                        logging.exception("Failed to prepare object-selection candidates")
+                        pred_out = {"error": f"{type(error).__name__}: {error}"}
+                        max_point_choice = None
                     my_result[f"step_{global_step}"] = {
-                        'step': global_step,
-                        'pred_frame_idx': pred_out[0],
-                        'pred_snap_type': pred_out[1],
-                        'pred_snap_idx': pred_out[2]
+                        "step": global_step,
+                        "agent_position": list(pts),
+                        **pred_out,
                     }
+                    if max_point_choice is None:
+                        my_result["evaluation_status"] = "error"
+                        my_result["failure_reason"] = pred_out["error"]
+                        logging.error("Invalid object selection: %s", pred_out["error"])
+                        break
                     step_log = {
                         'agent_position': list(pts),
                         'snapshots': list(scene.snapshots),
@@ -354,6 +376,8 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         pathfinder=scene.pathfinder,
                     )
                     if not update_success:
+                        my_result["evaluation_status"] = "error"
+                        my_result["failure_reason"] = "set_next_navigation_point failed"
                         logging.info(
                             f"Invalid: set_next_navigation_point failed!"
                         )
@@ -371,6 +395,8 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     save_visualization=cfg.save_visualization,
                 )
                 if return_values[0] is None:
+                    my_result["evaluation_status"] = "error"
+                    my_result["failure_reason"] = "agent_step_collect failed"
                     logging.info(
                         f"Agent_step failed!"
                     )

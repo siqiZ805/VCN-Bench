@@ -1,0 +1,12 @@
+
+default_agent: 0
+allow_sliding: false
+seed: 1
+scene_dataset: /mnt/petrelfs/zhangsiqi1/efm_data/data/scene_datasets/hm3d
+scene_dataset_config_file: '/mnt/inspurfs/efm_t/zhangsiqi/data/scene_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json'
+scene: null
+agent_height: 1.41
+agent_radius: 0.17
+agent_max_climb: 1.0
+cell_height: 0.05
+cell_size: 0.05

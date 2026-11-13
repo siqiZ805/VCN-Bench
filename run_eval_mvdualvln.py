@@ -24,6 +24,7 @@ from src.scene_memo import Scene
 from src.tsdf_planner import TSDFPlanner, SnapShot
 from src.utils import calc_agent_subtask_distance, get_pts_angle_goatbench
 from src.logger import Logger
+from src.tour_video import SAMPLING_PROTOCOL, sample_tour_video
 from model.query_dualvln import query_qwen, build_model
 
 
@@ -70,7 +71,14 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             logging.info(f"Loading scene {scene_id}")
             episode_id = episode["episode_id"]
             
-            if os.path.exists(os.path.join(cfg.output_dir, f"{scene_id}_ep_{episode_id}", 'result.json')):
+            output_path = os.path.join(cfg.output_dir, f"{scene_id}_ep_{episode_id}", 'result.json')
+            if os.path.exists(output_path):
+                with open(output_path) as stream:
+                    previous_result = json.load(stream)
+                if (previous_result.get("tour_video_sampling") != SAMPLING_PROTOCOL
+                        or previous_result.get("video_max_frame") != cfg.video_max_frame):
+                    raise ValueError("Existing result uses different tour-video sampling; "
+                                     "choose a new exp_name or output directory.")
                 continue
   
             try:
@@ -112,12 +120,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             sidx = episode['start_idx']
             eidx = episode['end_idx']
             tour_video = all_rgbs[sidx : eidx]
-            # downsample
-            video_len = eidx - sidx
-            step = 1
-            while video_len / step >= cfg.video_max_frame:
-                step += 1
-            tour_video = tour_video[::step]
+            tour_video = sample_tour_video(tour_video, cfg.video_max_frame)
 
             # nav goal
             _instr = episode['instruction']
@@ -128,7 +131,11 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
             
             # run steps
             global_step = -1
-            save_result = {}
+            save_result = {
+                "tour_video_sampling": SAMPLING_PROTOCOL,
+                "video_max_frame": cfg.video_max_frame,
+                "prior_video_frames": tour_video,
+            }
             hist_rgbs = []  # each element is [name, rgb]
             while global_step < num_step - 1:
                 global_step += 1

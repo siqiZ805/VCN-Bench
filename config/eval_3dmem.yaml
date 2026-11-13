@@ -1,20 +1,20 @@
 # General
 seed: 77
-exp_name: "eval_3dmem"
+exp_name: "eval_3dmem_qwen3vl_4b_object_v1_uniform_tour"
 output_parent_dir: "/your/exp/parent/dir"
 mp3d_dir: "/path/to/mp3d/scenes"
 # Leave empty when loading MP3D .glb files directly.
 scene_dataset_config_path: ""
 test_data_path: "/your/path/to/instruction/instruction.json.gz"
 video_root: "/your/path/to/tour/video"
-video_max_frame: 50
+video_max_frame: 50  # keep all frames up to this limit; otherwise sample evenly including first/last
 
 concept_graph_config_path: "config/concept_graph_default.yaml"
 
 # major settings
 choose_every_step: true  # whether to query vlm at each step, or only after arriving at the navigation target
 egocentric_views: true  # whether to add egocentric views when prompting vlm
-prefiltering: true
+prefiltering: true  # zero-shot Qwen category ranking before joint snapshot/object selection
 top_k_categories: 10
 
 # about detection model
@@ -23,8 +23,11 @@ sam_model_name: "/path/to/model/sam_l.pt"
 clip_model_path: "/path/to/model/CLIP-ViT-B-32/open_clip_pytorch_model.bin"
 class_set: memo
 
-qwen_path: "/path/to/model/ckpt"
-qwen_processor_path: "/path/to/model/Qwen3-VL-4B-Instruct"
+# Original instruction-tuned checkpoints, without VCN finetuning or custom token pooling.
+# For 8B, change qwen_path to Qwen/Qwen3-VL-8B-Instruct (or its local directory)
+# and use a distinct exp_name. The processor defaults to the same checkpoint.
+qwen_path: "Qwen/Qwen3-VL-4B-Instruct"
+qwen_processor_path: null
 
 # about snapshots clustering
 min_detection: 0

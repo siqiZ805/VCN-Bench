@@ -1,11 +1,11 @@
 # General
 seed: 77
-exp_name: "eval_dualvln"
+exp_name: "eval_dualvln_uniform_tour"
 output_parent_dir: "/your/exp/parent/dir"
 mp3d_dir: "/path/to/mp3d/scenes"
 test_data_path: "/your/path/to/instruction/instruction.json.gz"
 video_root: "/your/path/to/tour/video"
-video_max_frame: 50
+video_max_frame: 50  # keep all frames up to this limit; otherwise sample evenly including first/last
 concept_graph_config_path: "config/concept_graph_default.yaml"
 
 qwen_path: "/path/to/model/ckpt"

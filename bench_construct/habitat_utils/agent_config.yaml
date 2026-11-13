@@ -1,0 +1,17 @@
+rgb_sensor:
+  width: 640
+  height: 640
+  hfov: 90
+  position: [0, 1.5, 0]
+  pitch: 0
+depth_sensor:
+  width: 640
+  height: 480
+  hfov: 79
+  position: [0, 1.31, 0]
+height: 1.41
+radius: 0.1
+turn_angle: 15.0
+tilt_angle: 0.0
+step_size: 0.25
+random_view: false

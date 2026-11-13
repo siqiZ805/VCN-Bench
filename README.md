@@ -62,6 +62,7 @@ python frontier_to_pixel.py --merge --output_root /your/path/to/pixel/labels
 
 
 ## 🤖 Evaluation
+
 **MV-DualVLN**
 ```bash
 python run_eval_mvdualvln.py --cfg_file config/eval_mvdualvln.yaml
@@ -73,6 +74,7 @@ Set the scene, instruction, video, and detector checkpoints in `config/eval_3dme
 ```bash
 python run_eval_3dmem.py --cfg_file config/eval_3dmem.yaml
 ```
+
 
 
 ## 📄 License
